@@ -1,0 +1,66 @@
+# /etc/systemd/system/cleanbot.service
+#
+# systemd rather than cron, because cron gives you none of: restart on crash,
+# a managed environment, log capture, or an ordered stop. A trading process
+# that dies at 11:00 and is not noticed until 15:56 has silently disarmed the
+# EOD flatten, which is the one protection that has to survive absence.
+#
+#   sudo cp deploy/cleanbot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cleanbot
+#   journalctl -u cleanbot -f
+#
+# 🚨 MANUAL_TRADING_ARMED=true IS SAFE HERE, AND ONLY BECAUSE OF THE WINDOW.
+# It used to be the only gate, so it had to be set by hand per launch and die
+# with the process. It is now the CAPABILITY; the session arm you press in the
+# viewer is the ACT, and that expires after ARM_WINDOW_S (15 min) whether you
+# remember it or not. A permanently-capable process whose window is shut is
+# strictly safer than a process armed for eight hours because you typed an
+# env var at 09:00. Set it to false if you want the desk off entirely.
+#
+# 🚨 DRY_RUN IS SEPARATE AND GOVERNS THE BOT, NOT YOUR HAND. Leave it true
+# until the bot's own live rollout is a decision you have made deliberately.
+
+[Unit]
+Description=Cleanbot flow engine
+After=network-online.target
+Wants=network-online.target
+# 🚨 THESE TWO BELONG IN [Unit], NOT [Service]. systemd 255 logs
+# "Unknown key name 'StartLimitIntervalSec' in section 'Service', ignoring"
+# and carries on -- so the rate limit silently did not exist, which is
+# exactly the protection that matters when a crash loop at 09:31 would
+# otherwise hammer the Webull token endpoint until it locks you out.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/bot_engine/Cleanbot
+EnvironmentFile=/root/bot_engine/Cleanbot/.env
+Environment=DRY_RUN=true
+Environment=MANUAL_TRADING_ARMED=true
+Environment=PYTHONUNBUFFERED=1
+# 🚨 THE VENV, NOT THE SYSTEM PYTHON. /usr/bin/python3 on this
+# box has `requests` and nothing else -- the first boot test died
+# on `No module named 'dotenv'`. The deps live in
+# /root/bot_engine/venv, which is what the old cron line used.
+ExecStart=/root/bot_engine/venv/bin/python bot_runner.py
+
+# Restart, but not in a tight loop -- a crash that repeats every second at
+# 09:31 will exhaust the Webull token endpoint and lock you out of the day.
+Restart=on-failure
+RestartSec=30
+
+# 🚨 GIVE IT TIME TO DIE. bot_runner's shutdown path flattens open positions
+# (SHUTDOWN_EXIT_S); SIGKILLing it mid-flatten leaves a live 0DTE with nothing
+# watching it. 120s is comfortably longer than that path needs.
+KillSignal=SIGINT
+TimeoutStopSec=120
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cleanbot
+
+[Install]
+WantedBy=multi-user.target

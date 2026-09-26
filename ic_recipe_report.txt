@@ -1,0 +1,250 @@
+﻿
+================================================================================================
+  NVDA
+================================================================================================
+
+  --- POSITIVE_GEX / CALL   (config: ENABLED, min_flow $3.5M, TP +100% / SL -50% (R:R 2.0))
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $  5.0M  TP +100%  R:R 1.0 (SL -100.0%)  |  n= 575  win 47.7%  exp  +11.0%  tot    +6323%
+                min_flow $  3.5M  TP +100%  R:R 1.0 (SL -100.0%)  |  n= 616  win 47.9%  exp  +10.9%  tot    +6724%
+                min_flow $  7.5M  TP +100%  R:R 1.0 (SL -100.0%)  |  n= 523  win 47.6%  exp  +10.9%  tot    +5686%
+                min_flow $ 20.0M  TP +100%  R:R 1.5 (SL -66.7%)  |  n= 311  win 45.7%  exp  +10.7%  tot    +3333%
+                min_flow $  5.0M  TP +100%  R:R 1.5 (SL -66.7%)  |  n= 575  win 47.5%  exp  +10.7%  tot    +6150%
+      ----------------------------------------------------------------------------------------
+      YOUR CFG  min_flow $  3.5M  TP +100%  R:R 2.0 (SL -50.0%)  |  n= 616  win 46.1%  exp   +9.1%  tot    +5615%
+      => config is beaten by 1.9pp expectancy
+
+  --- POSITIVE_GEX / PUT   (config: disabled)
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $ 30.0M  TP +100%  R:R 1.0 (SL -100.0%)  |  n=1059  win 48.0%  exp   +2.3%  tot    +2435%
+                min_flow $ 30.0M  TP +100%  R:R 1.5 (SL -66.7%)  |  n=1059  win 43.4%  exp   -0.5%  tot     -537%
+                min_flow $ 15.0M  TP +100%  R:R 1.0 (SL -100.0%)  |  n=1717  win 45.5%  exp   -0.9%  tot    -1537%
+                min_flow $ 10.0M  TP +100%  R:R 1.0 (SL -100.0%)  |  n=1972  win 44.6%  exp   -0.9%  tot    -1779%
+                min_flow $ 30.0M  TP +100%  R:R 2.0 (SL -50.0%)  |  n=1059  win 39.8%  exp   -0.9%  tot     -997%
+
+  --- NEGATIVE_GEX / CALL   (config: disabled)
+      (no grid cells with >= 50 signals -- this recipe barely triggers in the lake)
+
+  --- NEGATIVE_GEX / PUT   (config: ENABLED, min_flow $3.5M, TP +60% / SL -40% (R:R 1.5))
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $ 20.0M  TP +100%  R:R 2.0 (SL -50.0%)  |  n=  59  win 78.0%  exp  +42.2%  tot    +2489%
+                min_flow $ 20.0M  TP + 80%  R:R 1.5 (SL -53.3%)  |  n=  59  win 83.1%  exp  +38.0%  tot    +2241%
+                min_flow $ 15.0M  TP +100%  R:R 2.0 (SL -50.0%)  |  n=  74  win 74.3%  exp  +36.0%  tot    +2667%
+                min_flow $ 15.0M  TP + 80%  R:R 1.5 (SL -53.3%)  |  n=  74  win 81.1%  exp  +35.2%  tot    +2608%
+                min_flow $ 20.0M  TP +100%  R:R 3.0 (SL -33.3%)  |  n=  59  win 67.8%  exp  +31.8%  tot    +1878%
+      ----------------------------------------------------------------------------------------
+      YOUR CFG  min_flow $  3.5M  TP + 60%  R:R 1.5 (SL -40.0%)  |  n= 139  win 58.3%  exp   +9.7%  tot    +1350%
+      => config is beaten by 32.5pp expectancy
+
+================================================================================================
+  AAPL
+================================================================================================
+
+  --- POSITIVE_GEX / CALL   (config: ENABLED, min_flow $3.5M, TP +80% / SL -40% (R:R 2.0))
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $  3.5M  TP +100%  R:R 2.0 (SL -50.0%)  |  n= 501  win 51.5%  exp  +12.8%  tot    +6390%
+                min_flow $  3.5M  TP +100%  R:R 1.0 (SL -100.0%)  |  n= 501  win 52.3%  exp  +12.7%  tot    +6383%
+                min_flow $  3.5M  TP +100%  R:R 1.5 (SL -66.7%)  |  n= 501  win 52.3%  exp  +12.6%  tot    +6308%
+                min_flow $  3.5M  TP +100%  R:R 3.0 (SL -33.3%)  |  n= 501  win 46.1%  exp  +11.8%  tot    +5928%
+                min_flow $  3.5M  TP + 80%  R:R 1.5 (SL -53.3%)  |  n= 501  win 52.1%  exp  +10.1%  tot    +5083%
+      ----------------------------------------------------------------------------------------
+      YOUR CFG  min_flow $  3.5M  TP + 80%  R:R 2.0 (SL -40.0%)  |  n= 501  win 47.9%  exp   +9.2%  tot    +4586%
+      => config is beaten by 3.6pp expectancy
+
+  --- POSITIVE_GEX / PUT   (config: disabled)
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $  5.0M  TP + 80%  R:R 2.0 (SL -40.0%)  |  n=1758  win 33.7%  exp   -2.5%  tot    -4457%
+                min_flow $  5.0M  TP +100%  R:R 3.0 (SL -33.3%)  |  n=1758  win 29.4%  exp   -2.7%  tot    -4680%
+                min_flow $  1.0M  TP +100%  R:R 3.0 (SL -33.3%)  |  n=2469  win 28.6%  exp   -2.9%  tot    -7080%
+                min_flow $  5.0M  TP + 80%  R:R 3.0 (SL -26.7%)  |  n=1758  win 28.0%  exp   -2.9%  tot    -5124%
+                min_flow $  2.0M  TP +100%  R:R 3.0 (SL -33.3%)  |  n=2257  win 28.7%  exp   -3.2%  tot    -7163%
+
+  --- NEGATIVE_GEX / CALL   (config: ENABLED, min_flow $3.5M, TP +80% / SL -27% (R:R 2.96))
+      (no grid cells with >= 50 signals -- this recipe barely triggers in the lake)
+
+  --- NEGATIVE_GEX / PUT   (config: disabled)
+      (no grid cells with >= 50 signals -- this recipe barely triggers in the lake)
+
+================================================================================================
+  MSFT
+================================================================================================
+
+  --- POSITIVE_GEX / CALL   (config: ENABLED, min_flow $5.0M, TP +100% / SL -50% (R:R 2.0))
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $ 30.0M  TP +100%  R:R 1.0 (SL -100.0%)  |  n= 160  win 46.2%  exp  +10.0%  tot    +1596%
+                min_flow $ 30.0M  TP + 80%  R:R 1.0 (SL -80.0%)  |  n= 160  win 48.8%  exp   +9.2%  tot    +1475%
+                min_flow $ 30.0M  TP +100%  R:R 1.5 (SL -66.7%)  |  n= 160  win 45.6%  exp   +8.5%  tot    +1363%
+                min_flow $ 30.0M  TP + 80%  R:R 3.0 (SL -26.7%)  |  n= 160  win 40.0%  exp   +8.4%  tot    +1351%
+                min_flow $ 30.0M  TP + 80%  R:R 1.5 (SL -53.3%)  |  n= 160  win 47.5%  exp   +8.3%  tot    +1331%
+      ----------------------------------------------------------------------------------------
+      YOUR CFG  min_flow $  5.0M  TP +100%  R:R 2.0 (SL -50.0%)  |  n= 751  win 40.3%  exp   +3.1%  tot    +2293%
+      => config is beaten by 6.9pp expectancy
+
+  --- POSITIVE_GEX / PUT   (config: disabled)
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $ 20.0M  TP + 60%  R:R 1.5 (SL -40.0%)  |  n= 886  win 42.3%  exp   -1.7%  tot    -1484%
+                min_flow $ 20.0M  TP + 60%  R:R 1.0 (SL -60.0%)  |  n= 886  win 46.6%  exp   -1.8%  tot    -1639%
+                min_flow $ 20.0M  TP + 40%  R:R 1.0 (SL -40.0%)  |  n= 886  win 48.2%  exp   -2.1%  tot    -1838%
+                min_flow $ 20.0M  TP + 80%  R:R 1.5 (SL -53.3%)  |  n= 886  win 42.2%  exp   -2.1%  tot    -1849%
+                min_flow $ 10.0M  TP + 60%  R:R 1.5 (SL -40.0%)  |  n=1410  win 41.4%  exp   -2.1%  tot    -2949%
+
+  --- NEGATIVE_GEX / CALL   (config: disabled)
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $  2.0M  TP +100%  R:R 3.0 (SL -33.3%)  |  n=  59  win 35.6%  exp   -0.0%  tot       -2%
+                min_flow $  3.5M  TP +100%  R:R 3.0 (SL -33.3%)  |  n=  59  win 35.6%  exp   -0.0%  tot       -2%
+                min_flow $  2.0M  TP + 40%  R:R 1.5 (SL -26.7%)  |  n=  59  win 42.4%  exp   -0.8%  tot      -47%
+                min_flow $  3.5M  TP + 40%  R:R 1.5 (SL -26.7%)  |  n=  59  win 42.4%  exp   -0.8%  tot      -47%
+                min_flow $  2.0M  TP + 40%  R:R 3.0 (SL -13.3%)  |  n=  59  win 28.8%  exp   -0.8%  tot      -50%
+
+  --- NEGATIVE_GEX / PUT   (config: ENABLED, min_flow $0.8M, TP +100% / SL -50% (R:R 2.0))
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $  1.0M  TP +100%  R:R 2.0 (SL -50.0%)  |  n=  51  win 80.4%  exp  +63.2%  tot    +3224%
+                min_flow $  2.0M  TP +100%  R:R 2.0 (SL -50.0%)  |  n=  51  win 80.4%  exp  +63.2%  tot    +3224%
+                min_flow $  1.0M  TP + 80%  R:R 1.5 (SL -53.3%)  |  n=  51  win 84.3%  exp  +53.8%  tot    +2743%
+                min_flow $  2.0M  TP + 80%  R:R 1.5 (SL -53.3%)  |  n=  51  win 84.3%  exp  +53.8%  tot    +2743%
+                min_flow $  1.0M  TP +100%  R:R 3.0 (SL -33.3%)  |  n=  51  win 58.8%  exp  +37.2%  tot    +1896%
+      ----------------------------------------------------------------------------------------
+      YOUR CFG (mf $0.8M / TP 100% / R:R 2.0) not in grid or < 50 signals
+
+================================================================================================
+  META
+================================================================================================
+
+  --- POSITIVE_GEX / CALL   (config: disabled)
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $  1.0M  TP + 80%  R:R 3.0 (SL -26.7%)  |  n=2164  win 26.9%  exp   -3.6%  tot    -7704%
+                min_flow $  5.0M  TP + 80%  R:R 3.0 (SL -26.7%)  |  n=1736  win 26.8%  exp   -3.8%  tot    -6512%
+                min_flow $  3.5M  TP + 80%  R:R 3.0 (SL -26.7%)  |  n=1920  win 26.7%  exp   -3.8%  tot    -7311%
+                min_flow $  5.0M  TP + 60%  R:R 3.0 (SL -20.0%)  |  n=1736  win 25.1%  exp   -3.9%  tot    -6770%
+                min_flow $ 10.0M  TP + 20%  R:R 3.0 (SL - 6.7%)  |  n=1271  win 23.5%  exp   -4.0%  tot    -5081%
+
+  --- POSITIVE_GEX / PUT   (config: ENABLED, min_flow $10.0M, TP +40% / SL -25% (R:R 1.6))
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $ 10.0M  TP +100%  R:R 1.0 (SL -100.0%)  |  n= 523  win 46.8%  exp   +5.7%  tot    +2968%
+                min_flow $ 15.0M  TP +100%  R:R 1.0 (SL -100.0%)  |  n= 406  win 42.9%  exp   +5.6%  tot    +2273%
+                min_flow $ 20.0M  TP +100%  R:R 1.0 (SL -100.0%)  |  n= 334  win 41.6%  exp   +5.5%  tot    +1851%
+                min_flow $ 10.0M  TP +100%  R:R 1.5 (SL -66.7%)  |  n= 523  win 46.7%  exp   +5.4%  tot    +2811%
+                min_flow $ 10.0M  TP +100%  R:R 2.0 (SL -50.0%)  |  n= 523  win 46.5%  exp   +5.3%  tot    +2797%
+      ----------------------------------------------------------------------------------------
+      YOUR CFG (mf $10.0M / TP 40% / R:R 1.6) not in grid or < 50 signals
+
+  --- NEGATIVE_GEX / CALL   (config: disabled)
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $ 15.0M  TP + 20%  R:R 1.0 (SL -20.0%)  |  n= 103  win 53.4%  exp   -0.2%  tot      -19%
+                min_flow $ 15.0M  TP + 60%  R:R 2.0 (SL -30.0%)  |  n= 103  win 35.0%  exp   -0.6%  tot      -65%
+                min_flow $ 20.0M  TP + 20%  R:R 1.0 (SL -20.0%)  |  n=  87  win 51.7%  exp   -0.7%  tot      -63%
+                min_flow $ 20.0M  TP + 60%  R:R 2.0 (SL -30.0%)  |  n=  87  win 34.5%  exp   -1.5%  tot     -132%
+                min_flow $ 15.0M  TP + 40%  R:R 2.0 (SL -20.0%)  |  n= 103  win 34.0%  exp   -1.6%  tot     -161%
+
+  --- NEGATIVE_GEX / PUT   (config: disabled)
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $ 10.0M  TP + 80%  R:R 1.0 (SL -80.0%)  |  n= 154  win 50.0%  exp  +10.0%  tot    +1543%
+                min_flow $ 10.0M  TP +100%  R:R 1.5 (SL -66.7%)  |  n= 154  win 47.4%  exp   +9.2%  tot    +1422%
+                min_flow $  7.5M  TP + 80%  R:R 1.0 (SL -80.0%)  |  n= 172  win 51.2%  exp   +9.1%  tot    +1568%
+                min_flow $  7.5M  TP +100%  R:R 1.5 (SL -66.7%)  |  n= 172  win 48.8%  exp   +8.9%  tot    +1537%
+                min_flow $ 10.0M  TP +100%  R:R 1.0 (SL -100.0%)  |  n= 154  win 48.1%  exp   +7.1%  tot    +1097%
+
+================================================================================================
+  AMZN
+================================================================================================
+
+  --- POSITIVE_GEX / CALL   (config: disabled)
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $ 30.0M  TP + 60%  R:R 3.0 (SL -20.0%)  |  n= 203  win 32.0%  exp   +2.3%  tot     +466%
+                min_flow $ 30.0M  TP + 40%  R:R 3.0 (SL -13.3%)  |  n= 203  win 34.5%  exp   +1.9%  tot     +381%
+                min_flow $ 30.0M  TP + 40%  R:R 2.0 (SL -20.0%)  |  n= 203  win 39.9%  exp   +1.0%  tot     +209%
+                min_flow $ 20.0M  TP + 60%  R:R 3.0 (SL -20.0%)  |  n= 368  win 31.0%  exp   +0.3%  tot     +114%
+                min_flow $ 30.0M  TP + 40%  R:R 1.5 (SL -26.7%)  |  n= 203  win 43.3%  exp   +0.2%  tot      +31%
+
+  --- POSITIVE_GEX / PUT   (config: ENABLED, min_flow $3.5M, TP +60% / SL -40% (R:R 1.5))
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $  5.0M  TP +100%  R:R 1.0 (SL -100.0%)  |  n= 381  win 59.3%  exp  +19.3%  tot    +7354%
+                min_flow $  3.5M  TP +100%  R:R 1.0 (SL -100.0%)  |  n= 425  win 59.5%  exp  +18.7%  tot    +7947%
+                min_flow $  1.0M  TP +100%  R:R 1.0 (SL -100.0%)  |  n= 515  win 58.1%  exp  +17.6%  tot    +9062%
+                min_flow $  7.5M  TP +100%  R:R 1.0 (SL -100.0%)  |  n= 318  win 59.1%  exp  +17.5%  tot    +5574%
+                min_flow $  2.0M  TP +100%  R:R 1.0 (SL -100.0%)  |  n= 475  win 58.3%  exp  +17.5%  tot    +8308%
+      ----------------------------------------------------------------------------------------
+      YOUR CFG  min_flow $  3.5M  TP + 60%  R:R 1.5 (SL -40.0%)  |  n= 425  win 55.5%  exp  +11.6%  tot    +4949%
+      => config is beaten by 7.7pp expectancy
+
+  --- NEGATIVE_GEX / CALL   (config: disabled)
+      (no grid cells with >= 50 signals -- this recipe barely triggers in the lake)
+
+  --- NEGATIVE_GEX / PUT   (config: disabled)
+      (no grid cells with >= 50 signals -- this recipe barely triggers in the lake)
+
+================================================================================================
+  SPY
+================================================================================================
+
+  --- POSITIVE_GEX / CALL   (config: ENABLED, min_flow $7.5M, TP +20% / SL -10% (R:R 2.0))
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $  5.0M  TP +100%  R:R 2.0 (SL -50.0%)  |  n= 250  win 46.0%  exp  +15.7%  tot    +3922%
+                min_flow $  7.5M  TP +100%  R:R 2.0 (SL -50.0%)  |  n= 205  win 45.9%  exp  +15.3%  tot    +3135%
+                min_flow $  5.0M  TP +100%  R:R 3.0 (SL -33.3%)  |  n= 250  win 39.6%  exp  +14.9%  tot    +3730%
+                min_flow $  7.5M  TP +100%  R:R 3.0 (SL -33.3%)  |  n= 205  win 39.0%  exp  +14.0%  tot    +2873%
+                min_flow $  3.5M  TP +100%  R:R 2.0 (SL -50.0%)  |  n= 286  win 44.8%  exp  +13.8%  tot    +3938%
+      ----------------------------------------------------------------------------------------
+      YOUR CFG  min_flow $  7.5M  TP + 20%  R:R 2.0 (SL -10.0%)  |  n= 205  win 36.6%  exp   -1.7%  tot     -350%
+      => config is beaten by 17.4pp expectancy
+
+  --- POSITIVE_GEX / PUT   (config: ENABLED, min_flow $30.0M, TP +100% / SL -66% (R:R 1.52))
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $ 30.0M  TP + 80%  R:R 1.0 (SL -80.0%)  |  n= 203  win 46.3%  exp   +3.5%  tot     +707%
+                min_flow $ 30.0M  TP +100%  R:R 1.0 (SL -100.0%)  |  n= 203  win 41.4%  exp   +1.6%  tot     +316%
+                min_flow $ 30.0M  TP + 60%  R:R 2.0 (SL -30.0%)  |  n= 203  win 35.5%  exp   -0.5%  tot      -94%
+                min_flow $ 30.0M  TP + 60%  R:R 3.0 (SL -20.0%)  |  n= 203  win 28.6%  exp   -0.7%  tot     -138%
+                min_flow $ 30.0M  TP +100%  R:R 1.5 (SL -66.7%)  |  n= 203  win 36.9%  exp   -2.0%  tot     -402%
+      ----------------------------------------------------------------------------------------
+      YOUR CFG  min_flow $ 30.0M  TP +100%  R:R 1.5 (SL -66.7%)  |  n= 203  win 36.9%  exp   -2.0%  tot     -402%
+      => config is beaten by 5.5pp expectancy
+
+  --- NEGATIVE_GEX / CALL   (config: disabled)
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $ 30.0M  TP + 20%  R:R 3.0 (SL - 6.7%)  |  n=1158  win 23.8%  exp   -3.1%  tot    -3593%
+                min_flow $ 30.0M  TP + 20%  R:R 2.0 (SL -10.0%)  |  n=1158  win 31.2%  exp   -3.2%  tot    -3711%
+                min_flow $ 20.0M  TP + 20%  R:R 3.0 (SL - 6.7%)  |  n=1552  win 23.5%  exp   -3.3%  tot    -5143%
+                min_flow $  1.0M  TP + 20%  R:R 3.0 (SL - 6.7%)  |  n=3230  win 22.9%  exp   -3.4%  tot   -11049%
+                min_flow $  1.0M  TP + 20%  R:R 2.0 (SL -10.0%)  |  n=3230  win 30.6%  exp   -3.4%  tot   -11104%
+
+  --- NEGATIVE_GEX / PUT   (config: ENABLED, min_flow $20.0M, TP +100% / SL -66% (R:R 1.52))
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $ 20.0M  TP +100%  R:R 1.5 (SL -66.7%)  |  n= 690  win 51.6%  exp  +10.1%  tot    +6955%
+                min_flow $ 20.0M  TP +100%  R:R 1.0 (SL -100.0%)  |  n= 690  win 53.9%  exp   +9.5%  tot    +6543%
+                min_flow $ 20.0M  TP +100%  R:R 2.0 (SL -50.0%)  |  n= 690  win 45.9%  exp   +8.4%  tot    +5814%
+                min_flow $ 15.0M  TP +100%  R:R 1.5 (SL -66.7%)  |  n= 758  win 50.3%  exp   +8.4%  tot    +6379%
+                min_flow $ 30.0M  TP +100%  R:R 1.0 (SL -100.0%)  |  n= 566  win 53.0%  exp   +8.4%  tot    +4763%
+      ----------------------------------------------------------------------------------------
+      YOUR CFG  min_flow $ 20.0M  TP +100%  R:R 1.5 (SL -66.7%)  |  n= 690  win 51.6%  exp  +10.1%  tot    +6955%
+      => config is OPTIMAL
+
+================================================================================================
+  GOOGL
+================================================================================================
+
+  --- POSITIVE_GEX / CALL   (config: disabled)
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $ 20.0M  TP + 80%  R:R 1.5 (SL -53.3%)  |  n= 395  win 45.8%  exp   +4.4%  tot    +1745%
+                min_flow $ 20.0M  TP + 60%  R:R 1.0 (SL -60.0%)  |  n= 395  win 51.6%  exp   +4.2%  tot    +1642%
+                min_flow $ 20.0M  TP +100%  R:R 2.0 (SL -50.0%)  |  n= 395  win 42.3%  exp   +3.9%  tot    +1526%
+                min_flow $ 15.0M  TP +100%  R:R 3.0 (SL -33.3%)  |  n= 594  win 35.2%  exp   +3.6%  tot    +2161%
+                min_flow $ 15.0M  TP + 80%  R:R 2.0 (SL -40.0%)  |  n= 594  win 40.6%  exp   +3.6%  tot    +2112%
+
+  --- POSITIVE_GEX / PUT   (config: disabled)
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $ 30.0M  TP +100%  R:R 1.5 (SL -66.7%)  |  n= 188  win 41.0%  exp   +3.2%  tot     +599%
+                min_flow $ 30.0M  TP +100%  R:R 2.0 (SL -50.0%)  |  n= 188  win 36.7%  exp   +0.4%  tot      +78%
+                min_flow $ 30.0M  TP +100%  R:R 1.0 (SL -100.0%)  |  n= 188  win 41.5%  exp   +0.2%  tot      +44%
+                min_flow $ 30.0M  TP + 80%  R:R 2.0 (SL -40.0%)  |  n= 188  win 37.2%  exp   -0.4%  tot      -81%
+                min_flow $ 30.0M  TP +100%  R:R 3.0 (SL -33.3%)  |  n= 188  win 31.4%  exp   -0.4%  tot      -82%
+
+  --- NEGATIVE_GEX / CALL   (config: disabled)
+      ----------------------------------------------------------------------------------------
+      BEST      min_flow $  5.0M  TP + 20%  R:R 3.0 (SL - 6.7%)  |  n=  86  win 18.6%  exp   -5.0%  tot     -428%
+                min_flow $  3.5M  TP + 20%  R:R 3.0 (SL - 6.7%)  |  n=  95  win 17.9%  exp   -5.1%  tot     -482%
+                min_flow $  2.0M  TP + 20%  R:R 3.0 (SL - 6.7%)  |  n= 106  win 17.9%  exp   -5.1%  tot     -545%
+                min_flow $  1.0M  TP + 20%  R:R 3.0 (SL - 6.7%)  |  n= 115  win 17.4%  exp   -5.4%  tot     -623%
+                min_flow $  7.5M  TP + 20%  R:R 3.0 (SL - 6.7%)  |  n=  69  win 15.9%  exp   -5.7%  tot     -395%
+
+  --- NEGATIVE_GEX / PUT   (config: ENABLED, min_flow $1.0M, TP +80% / SL -40% (R:R 2.0))
+      (no grid cells with >= 50 signals -- this recipe barely triggers in the lake)

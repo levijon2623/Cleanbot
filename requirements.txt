@@ -1,0 +1,50 @@
+# Cleanbot dependencies.
+#
+# Floors, not pins. The versions in the comments are what this was developed and
+# run against as of 2026-09-26 -- if something breaks, check against those first.
+#
+#     python -m venv venv
+#     venv/bin/pip install -r requirements.txt        # (Scripts\ on Windows)
+#
+# Python 3.11+ is required: the codebase uses zoneinfo, `X | None` annotations
+# and `sys.stdlib_module_names`.
+
+# ---------------------------------------------------------------------------
+# CORE -- the live directional bot and the viewer need all of these
+# ---------------------------------------------------------------------------
+pandas>=2.2                     # dev: 3.0.5
+numpy>=1.26                     # dev: 2.5.2
+polars>=1.0                     # dev: 1.43.2   -- the lake/ reader
+httpx>=0.27                     # dev: 0.28.1   -- Unusual Whales client
+requests>=2.31                  # dev: 2.34.2
+python-dotenv>=1.0              # dev: 1.2.2
+websocket-client>=1.7           # dev: 1.9.0    -- `import websocket`
+websockets>=12.0                # dev: 16.1.1   -- `import websockets`, async
+pyarrow>=15.0                   # parquet engine for pandas/polars round-trips
+
+# Webull execution + market data.
+# 🚨 `webull-openapi-python-sdk`, NOT the unofficial `webull` package on PyPI.
+# Both import as `webull`; only this one has the OpenAPI order endpoints, and
+# installing the other gives you a plausible-looking client that cannot trade.
+webull-openapi-python-sdk>=2.0.17
+
+# ---------------------------------------------------------------------------
+# HYPERLIQUID -- optional, and OFF BY DEFAULT
+# 🚨 Installing these does not enable perp trading. hl_gate.py requires an
+# explicit capability flag AND a legal attestation, and refuses everything until
+# both are set. US persons: read hl_gate.LEGAL_NOTICE (`python hl_gate.py`)
+# before you install, not after. Skip this section entirely and the rest of the
+# toolkit is unaffected -- nothing in bot_runner's path imports it.
+# ---------------------------------------------------------------------------
+hyperliquid-python-sdk>=0.24.0
+eth-account>=0.13.0
+
+# ---------------------------------------------------------------------------
+# RESEARCH -- only for the check_*/build_*/backfill_* scripts
+# Not needed to run the bot. databento is a paid data subscription; the MBO
+# scripts (fetch_mbo.py, build_mbo_features.py, check_book_*.py) are the only
+# things that touch it.
+# ---------------------------------------------------------------------------
+scipy>=1.11                     # dev: 1.18.1   -- 2 research scripts
+scikit-learn>=1.4               # dev: 1.9.0    -- ml_feature_scan.py only
+databento>=0.40                 # dev: 0.86.0   -- PAID; MBO scripts only

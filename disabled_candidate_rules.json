@@ -1,0 +1,58 @@
+[
+  {
+    "name": "META midday PUT (amp>=1)",
+    "ticker": "META", "direction": "PUT",
+    "hours": [11, 12, 13, 14], "dte": [0, 1],
+    "amp_min": 1, "flow_pct": 65,
+    "target_roe": 0.80, "rr": 1.0
+  },
+  {
+    "name": "MSFT quiet PUT (amp>=1)",
+    "ticker": "MSFT", "direction": "PUT",
+    "hours": [9, 10, 11, 12, 13, 14], "dte": [0, 1],
+    "amp_min": 1, "flow_pct": 50,
+    "target_roe": 1.00, "rr": 1.0
+  },
+  {
+    "name": "MSFT quiet PUT (amp>=2)",
+    "ticker": "MSFT", "direction": "PUT",
+    "hours": [9, 10, 11, 12, 13, 14], "dte": [0, 1],
+    "amp_min": 2, "flow_pct": 50,
+    "target_roe": 1.00, "rr": 1.0
+  },
+  {
+    "name": "AMZN POS-GEX PUT",
+    "ticker": "AMZN", "direction": "PUT",
+    "hours": [11, 13], "dte": [0],
+    "regime": "POSITIVE_GEX", "flow_pct": 65,
+    "target_roe": 1.00, "rr": 2.0
+  },
+  {
+    "name": "COIN amp1 PUT",
+    "ticker": "COIN", "direction": "PUT",
+    "hours": [9, 10, 11, 12, 13, 14], "dte": [0, 1],
+    "amp_min": 1, "flow_pct": 90,
+    "target_roe": 1.00, "rr": 3.0
+  },
+  {
+    "name": "TQQQ HIVOL PUT",
+    "ticker": "TQQQ", "direction": "PUT",
+    "hours": [9, 10, 11, 12, 13, 14], "dte": [0, 1],
+    "regime": "HIVOL", "flow_pct": 90,
+    "target_roe": 1.00, "rr": 1.0
+  },
+  {
+    "name": "TSLL NORMVOL CALL",
+    "ticker": "TSLL", "direction": "CALL",
+    "hours": [9, 10, 11, 12, 13, 14], "dte": [0, 1],
+    "regime": "NORMVOL", "flow_pct": 65,
+    "target_roe": 0.40, "rr": 1.0
+  },
+  {
+    "name": "IBIT UPTREND PUT",
+    "ticker": "IBIT", "direction": "PUT",
+    "hours": [9, 10, 11, 12, 13, 14], "dte": [0, 1],
+    "regime": "UPTREND", "flow_pct": 50,
+    "target_roe": 1.00, "rr": 1.0
+  }
+]

@@ -1,0 +1,68 @@
+Cleanbot
+Copyright 2026 levijon
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+--------------------------------------------------------------------------------
+NO WARRANTY, AND A SPECIFIC ONE WORTH SPELLING OUT
+--------------------------------------------------------------------------------
+
+This software places orders for financial instruments. Sections 7 and 8 of the
+Apache License disclaim all warranties and all liability, and they are meant
+literally here: running this software can lose you money, quickly and
+irrecoverably. You are solely responsible for every order it sends on your
+behalf, for the configuration that allowed it, and for your own compliance with
+the laws and exchange rules that apply to you.
+
+Nothing in this repository is financial, legal, tax or investment advice.
+
+See the risk section of README.md, and hl_gate.py for the separate restrictions
+that apply to the Hyperliquid perpetual futures component.
+
+--------------------------------------------------------------------------------
+THIRD-PARTY SERVICES
+--------------------------------------------------------------------------------
+
+This software is a client for services operated by others. It is not affiliated
+with, endorsed by, or sponsored by any of them, and their names are used only to
+identify the interfaces this code speaks to:
+
+  Unusual Whales      options flow, gamma exposure and dark pool data
+  Webull              brokerage execution and market data (OpenAPI SDK)
+  Hyperliquid         perpetual futures venue (locked; see hl_gate.py)
+  Databento           market-by-order historical data (research scripts only)
+  Rithmic             futures market data (see below)
+  Telegram            optional trade notifications
+  TradingView         referenced in research notes; no code included
+
+Each requires your own account and credentials, and each has its own terms of
+service and market-data agreements, which this license does not alter or grant
+you any rights under. Some are paid.
+
+--------------------------------------------------------------------------------
+NOT INCLUDED IN THIS DISTRIBUTION
+--------------------------------------------------------------------------------
+
+Two things present in the authors' working tree are deliberately excluded from
+the published repository, and the code that depends on them will not run without
+you supplying your own copy:
+
+  rithmic_protos/            Rithmic's protobuf schema (.proto files). These are
+                             distributed by Rithmic to its own API customers
+                             under their agreement, and are not ours to
+                             redistribute. `rithmic_streamer.py` is included and
+                             expects them to be regenerated from the schema
+                             Rithmic gives you. Nothing in the directional
+                             options bot uses this path.
+
+  smart_money_flow.py        A Python port of "Smart Money Flow Signals
+  check_smart_money_flow.py  [QuantAlgo]" (TradingView Pine Script), which is
+                             licensed CC BY-NC-SA 4.0. A port is a derivative
+                             work, so the NonCommercial and ShareAlike terms
+                             would follow it and conflict with the Apache
+                             license applied to the rest of this repository.
+                             Excluded rather than resolved. The research finding
+                             it produced is recorded in METHODOLOGY.md; the code
+                             is not published here.
+
+--------------------------------------------------------------------------------

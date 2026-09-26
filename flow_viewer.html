@@ -1,0 +1,1285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cleanbot Flow Viewer</title>
+<!--
+  Local flow-trigger viewer. Served from the repo root:
+      python export_flow_tape.py
+      python -m http.server 8765
+      http://localhost:8765/flow_viewer.html
+
+  WHY THIS EXISTS RATHER THAN A PINE SCRIPT
+  TradingView cannot ingest the cumulative net-premium series: Pine Seeds is
+  EOD-only and closed to new repos, and Pine has no HTTP. check_tv_proxy tested
+  rebuilding the trigger from OHLCV that Pine CAN compute and the random-sign
+  placebo beat the real proxies, so the series has to be shipped to the chart.
+
+  EXTENDING IT
+  Everything drawn lives in draw(). To add a study, push an entry onto OVERLAYS
+  (pane 1 = flow, pane 0 = price) -- it gets a series and a legend row for free.
+-->
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3; --dim:#8b949e;
+    --up:#3fb950; --dn:#f85149; --call:#58a6ff; --put:#d29922;
+    --pass:#3fb950; --fail:#484f58; --accent:#a371f7;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+    font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  #app{display:flex;height:100vh;overflow:hidden}
+  #side{width:300px;flex:0 0 300px;border-right:1px solid var(--line);
+    display:flex;flex-direction:column;background:var(--panel)}
+  #side h1{font-size:13px;margin:0;padding:12px 14px;border-bottom:1px solid var(--line);
+    letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+  #filters{padding:10px 12px;border-bottom:1px solid var(--line);display:grid;
+    grid-template-columns:1fr 1fr;gap:6px}
+  select,input,button{background:#0d1117;color:var(--fg);border:1px solid var(--line);
+    border-radius:6px;padding:5px 7px;font:inherit;width:100%}
+  button{cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  label.chk{grid-column:1/-1;display:flex;align-items:center;gap:6px;color:var(--dim)}
+  label.chk input{width:auto}
+  #livebar{padding:10px 12px;border-bottom:1px solid var(--line);display:flex;
+    gap:8px;align-items:center;flex-direction:column}
+  #livebar button{background:#1c2128;border-color:var(--line)}
+  #livebar button.on{background:#2d1b1b;border-color:var(--dn);color:var(--dn);
+    animation:pulse 2s ease-in-out infinite}
+  @keyframes pulse{50%{opacity:.62}}
+  #liveInfo{font-size:11px;color:var(--dim);text-align:center}
+  #list{flex:1;overflow-y:auto;min-height:120px}
+  /* ---- strike strip ---- */
+  .tkrow{padding:6px 12px;border-bottom:1px solid #1c2128;cursor:pointer;
+    display:flex;justify-content:space-between;align-items:center}
+  .tkrow:hover{background:#1c2128}
+  .tkrow.sel{background:#1f2937;border-left:3px solid var(--accent);padding-left:9px}
+  .tkrow .d{color:var(--dim);font-size:11px}
+  .tkrow .p.pos{color:var(--up)} .tkrow .p.neg{color:var(--dn)}
+  .car{color:var(--accent);display:inline-block;width:10px}
+  .strikes{background:#0b0f14;border-bottom:1px solid var(--line)}
+  .strikes table{width:100%;border-collapse:collapse;font-size:11px}
+  .strikes th{color:var(--dim);font-weight:400;text-align:right;padding:3px 8px;
+    border-bottom:1px solid var(--line)}
+  .strikes th:first-child{text-align:left}
+  .strikes td{padding:3px 8px;text-align:right;border-bottom:1px solid #12171d}
+  .strikes td:first-child{text-align:left;font-weight:600}
+  .strikes tr{cursor:pointer}
+  .strikes tr:hover td{background:#1c2128}
+  .k-atm td{background:#0d2033;border-left:3px solid var(--call)}
+  .k-itm td{background:#0f2417;border-left:3px solid var(--up)}
+  .k-otm td{background:#2a1416;border-left:3px solid var(--dn)}
+  .k-sel td{outline:1px solid var(--accent);background:#241b33 !important}
+  /* ---- staging ---- */
+  #stage{position:fixed;left:300px;top:0;bottom:0;width:330px;z-index:60;
+    background:var(--panel);border-right:1px solid var(--line);
+    display:none;flex-direction:column;box-shadow:12px 0 28px #0009}
+  #stageBan{padding:14px;text-align:center;font-weight:700;letter-spacing:.1em;
+    font-size:13px}
+  #stageBan.off{background:#21262d;color:var(--dim);border-bottom:2px solid var(--line)}
+  #stageBan.safe{background:#3a3212;color:#f0d264;border-bottom:2px solid #f0d264}
+  #stageBan.live{background:#4a1418;color:#ff9e99;border-bottom:2px solid var(--dn);
+    animation:pulse 1.6s ease-in-out infinite}
+  #stageBody{padding:14px;flex:1;overflow-y:auto}
+  #stageBody .kv{display:flex;justify-content:space-between;padding:3px 0;
+    font-size:12px;color:var(--dim)}
+  #stageBody .kv b{color:var(--fg)}
+  #prem{font-size:22px;text-align:center;padding:10px 0;font-weight:700}
+  #prem.over{color:var(--dn)}
+  .bigbtn{width:100%;padding:14px;font-size:14px;font-weight:700;
+    letter-spacing:.06em;margin-top:8px}
+  .bigbtn.call{border-color:var(--up);color:var(--up)}
+  .bigbtn.call:hover:not(:disabled){background:#11291a}
+  .bigbtn.put{border-color:var(--dn);color:var(--dn)}
+  .bigbtn.put:hover:not(:disabled){background:#2a1416}
+  .bigbtn:disabled{opacity:.3;cursor:not-allowed}
+  /* ---- telemetry ---- */
+  #telem{height:190px;border-top:1px solid var(--line);display:none;
+    flex-direction:column;background:#0b0f14}
+  #telem h2{margin:0;padding:7px 12px;font-size:10px;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--dim);border-bottom:1px solid var(--line);
+    display:flex;justify-content:space-between}
+  #hold{padding:3px 0;font-size:11px;border-bottom:1px solid var(--line);
+    max-height:84px;overflow-y:auto}
+  #hold .p{padding:3px 12px;cursor:pointer;display:flex;gap:8px;
+    justify-content:space-between;align-items:baseline}
+  #hold .p:hover{background:#1c2128}
+  #hold .p.on{background:#241b33;border-left:3px solid var(--accent);
+    padding-left:9px}
+  #hold .p.bot,#hold .p.none{cursor:default}
+  #hold .p.bot:hover,#hold .p.none:hover{background:none}
+  #exitbar{display:none;gap:6px;padding:6px 12px;
+    border-bottom:1px solid var(--line)}
+  #exitbar button{padding:8px 6px;font-size:10.5px;font-weight:700;
+    letter-spacing:.04em}
+  #xMkt{border-color:var(--put);color:var(--put)}
+  #xMkt:hover:not(:disabled){background:#2a2411}
+  #x911{flex:0 0 78px;border-color:var(--dn);color:var(--dn)}
+  #x911:hover:not(:disabled){background:#2a1416}
+  #x911.hot{background:var(--dn);color:#fff;border-color:#fff;
+    animation:pulse .7s ease-in-out infinite}
+  #exitbar button:disabled{opacity:.3;cursor:not-allowed}
+  #panicMsg{padding:0 12px 6px;font-size:10.5px;color:var(--dn);display:none;
+    line-height:1.5}
+  #feed{flex:1;overflow-y:auto;padding:5px 0;font-size:10.5px;line-height:1.55}
+  #feed div{padding:1px 12px;white-space:nowrap;overflow:hidden;
+    text-overflow:ellipsis}
+  #feed .t{color:var(--fail)}
+  #feed .REQ{color:var(--dim)} #feed .GUARD{color:var(--put)}
+  #feed .EXEC{color:var(--up)}
+  #hold .mh{color:var(--accent)} #hold .bh{color:var(--put)}
+  #hold button{width:auto;padding:1px 7px;font-size:10px;margin-left:6px}
+  #blk{font-size:11px;color:var(--put);min-height:14px;margin-top:8px;
+    line-height:1.5}
+  #ordMsg{font-size:11px;color:var(--dim);margin-top:8px;min-height:14px;
+    word-break:break-word}
+  .qtyrow{display:flex;gap:8px;align-items:center;margin:8px 0}
+  .qtyrow input[type=range]{padding:0}
+  .qtyrow input[type=number]{width:62px;flex:0 0 62px;text-align:center}
+  .row{padding:7px 12px;border-bottom:1px solid #1c2128;cursor:pointer;display:flex;
+    justify-content:space-between;gap:8px;align-items:baseline}
+  .row:hover{background:#1c2128}
+  .row.sel{background:#1f2937;border-left:3px solid var(--accent);padding-left:9px}
+  .row .d{color:var(--dim);font-size:11px}
+  .row .p.pos{color:var(--up)} .row .p.neg{color:var(--dn)}
+  .row .p.flat{color:var(--fail)}
+  #main{flex:1;display:flex;flex-direction:column;min-width:0}
+  #bar{padding:9px 14px;border-bottom:1px solid var(--line);display:flex;
+    gap:16px;align-items:center;flex-wrap:wrap;background:var(--panel)}
+  #bar .k{color:var(--dim)} #bar b{font-weight:600}
+  .tag{border:1px solid var(--line);border-radius:999px;padding:1px 9px;font-size:11px}
+  #chart{flex:1;min-height:0}
+  /* 🚨 THE KEY IS A POPUP, NOT A STRIP. It was a permanent band across the
+     bottom of the price pane -- ~60px of chart given up all session to text
+     you read twice a week. `k` toggles it; the chart keeps the space. */
+  #legend{position:fixed;left:312px;bottom:14px;z-index:70;display:none;
+    max-width:min(940px, calc(100vw - 340px));max-height:52vh;overflow-y:auto;
+    padding:14px 16px;border:1px solid var(--line);border-radius:10px;
+    background:rgba(22,27,34,.97);box-shadow:0 10px 32px #000a;
+    gap:14px 20px;flex-wrap:wrap;font-size:11px;color:var(--dim)}
+  #legend.on{display:flex}
+  #legend i{width:9px;height:9px;display:inline-block;border-radius:2px;margin-right:5px}
+  #legend .hd{width:100%;margin:-4px 0 2px;color:var(--fg);font-weight:600;
+    letter-spacing:.06em;text-transform:uppercase;font-size:10px;
+    display:flex;justify-content:space-between}
+  #keyHint{position:fixed;left:312px;bottom:14px;z-index:69;font-size:10px;
+    color:var(--fail);padding:3px 8px;border:1px solid var(--line);
+    border-radius:6px;background:rgba(22,27,34,.8);cursor:pointer;
+    user-select:none}
+  #keyHint:hover{color:var(--fg);border-color:var(--accent)}
+  #empty{display:flex;align-items:center;justify-content:center;height:100%;
+    color:var(--dim);flex-direction:column;gap:10px;text-align:center;padding:24px}
+  code{background:#1c2128;padding:2px 6px;border-radius:4px;color:var(--fg)}
+  #noteWrap{position:fixed;inset:0;background:#0008;display:none;
+    align-items:center;justify-content:center;z-index:99}
+  #note{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:18px;width:440px;max-width:92vw}
+  #note h2{margin:0 0 4px;font-size:13px;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--dim)}
+  #note .ctx{font-size:11px;color:var(--dim);margin-bottom:12px;line-height:1.6}
+  #note .grp{display:flex;gap:6px;margin-bottom:10px}
+  #note .grp button{flex:1;padding:8px}
+  #note button.sel{border-color:var(--accent);background:#241b33;color:var(--fg)}
+  #note button.take.sel{border-color:var(--up);background:#11291a;color:var(--up)}
+  #note button.pass.sel{border-color:var(--put);background:#2a2411;color:var(--put)}
+  #note textarea{width:100%;height:70px;resize:vertical;margin-bottom:10px}
+  #note .foot{display:flex;gap:8px;align-items:center}
+  #note .foot .d{flex:1;font-size:11px}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="side">
+    <h1>Flow Viewer</h1>
+    <div id="livebar"><button id="liveBtn">● GO LIVE</button>
+      <span id="liveInfo" class="d"></span></div>
+    <div id="filters">
+      <select id="fTicker"><option value="">all tickers</option></select>
+      <select id="fHalf">
+        <option value="">IS + OOS</option><option value="IS">IS</option>
+        <option value="OOS">OOS</option>
+      </select>
+      <label class="chk"><input type="checkbox" id="fTraded"> filled sessions only</label>
+      <label class="chk"><input type="checkbox" id="fPass"> had a trigger clear all gates</label>
+    </div>
+    <div id="list"></div>
+    <!-- 3. GUARD TELEMETRY. A request that sits on REQ with no verdict under it
+         means bot_runner is not running -- which is the failure you most want
+         visible, and the one a silent UI hides. -->
+    <div id="telem">
+      <h2><span>guard telemetry</span><span id="telemN"></span></h2>
+      <div id="hold"></div>
+      <div id="exitbar">
+        <button id="xMkt" disabled>SELECT A MANUAL POSITION</button>
+        <button id="x911">911</button>
+      </div>
+      <div id="panicMsg"></div>
+      <div id="feed"></div>
+    </div>
+  </div>
+  <!-- 2. ORDER STAGING. Slides out from the strike strip. Every limit shown
+       here is recomputed by manual_orders.py before anything is sent: this
+       panel is a convenience, never the guard. -->
+  <div id="stage">
+    <div id="stageBan" class="off">DISARMED</div>
+    <div id="stageBody">
+      <div style="font-size:15px;font-weight:700;margin-bottom:8px"
+           id="stageHdr">—</div>
+      <div class="kv"><span>bid / ask</span><b id="sBa">—</b></div>
+      <div class="kv"><span>spread</span><b id="sSp">—</b></div>
+      <div class="kv"><span>volume / OI</span><b id="sVo">—</b></div>
+      <div class="kv"><span>marketable limit</span><b id="sLim">—</b></div>
+      <div class="qtyrow">
+        <input type="range" id="qtyR" min="1" max="20" value="1">
+        <input type="number" id="qtyN" min="1" max="20" value="1">
+      </div>
+      <div class="kv"><span>max premium (qty × ask × 100)</span></div>
+      <div id="prem">—</div>
+      <button id="armBtn" style="margin-bottom:8px">ARM</button>
+      <input id="ordNote" placeholder="note (optional, stored with the fill)">
+      <button class="bigbtn call" id="buyC" disabled>BUY CALL</button>
+      <button class="bigbtn put" id="buyP" disabled>BUY PUT</button>
+      <div id="blk"></div>
+      <div id="ordMsg"></div>
+      <button id="stageX" style="margin-top:14px">close staging</button>
+    </div>
+  </div>
+  <div id="main">
+    <div id="bar"><span class="k">loading…</span></div>
+    <div id="chart"><div id="empty">loading <code>tape/index.json</code>…</div></div>
+    <div id="legend"></div>
+    <div id="keyHint" title="show the chart key">k · key</div>
+  </div>
+  <div id="noteWrap"><div id="note">
+    <h2>Log a read</h2>
+    <div class="ctx" id="noteCtx"></div>
+    <div class="grp">
+      <button class="dir" data-v="CALL">CALL</button>
+      <button class="dir" data-v="PUT">PUT</button>
+    </div>
+    <div class="grp">
+      <button class="act take" data-v="TAKE">would TAKE</button>
+      <button class="act pass" data-v="PASS">considered, PASS</button>
+    </div>
+    <textarea id="noteWhy" placeholder="why — the levels, the tape, what you're seeing. Written BEFORE the outcome, which is the whole point."></textarea>
+    <div class="foot">
+      <span class="d" id="noteMsg">esc to cancel · ctrl+enter to save</span>
+      <button id="noteSave" style="width:auto;padding:6px 16px">save</button>
+    </div>
+  </div></div>
+</div>
+<script>
+const LWC = window.LightweightCharts;
+const $ = s => document.querySelector(s);
+const fmtM = v => (Math.abs(v) >= 1e6 ? (v/1e6).toFixed(1)+'M'
+                 : Math.abs(v) >= 1e3 ? (v/1e3).toFixed(0)+'k' : String(v));
+const hhmm = t => { const d = new Date(t*1000);
+  return String(d.getUTCHours()).padStart(2,'0')+':'+String(d.getUTCMinutes()).padStart(2,'0'); };
+
+let IDX = null, SPLIT = null, chart = null, cur = null;
+
+/* Add a study here and it gets a series + legend row for free.
+   pane 0 = price, pane 1 = flow, pane 2 = the option leg.        */
+const OVERLAYS = [];
+
+const THEME = {
+  layout:{ background:{color:'#0d1117'}, textColor:'#8b949e', panes:{separatorColor:'#30363d'} },
+  grid:{ vertLines:{color:'#161b22'}, horzLines:{color:'#161b22'} },
+  rightPriceScale:{ borderColor:'#30363d' },
+  timeScale:{ borderColor:'#30363d', timeVisible:true, secondsVisible:false },
+  crosshair:{ mode:LWC.CrosshairMode.Normal },
+};
+
+function half(d){ return d < SPLIT ? 'IS' : 'OOS'; }
+
+function visible(){
+  const tk = $('#fTicker').value, hf = $('#fHalf').value;
+  const tr = $('#fTraded').checked, ps = $('#fPass').checked;
+  return IDX.sessions.filter(s =>
+    (!tk || s.ticker === tk) && (!hf || half(s.date) === hf) &&
+    (!tr || s.n_trade > 0) && (!ps || s.n_pass > 0));
+}
+
+function renderList(){
+  const rows = visible();
+  $('#list').innerHTML = rows.map((s,i) => {
+    const cls = s.n_trade ? (s.pnl > 0 ? 'pos' : 'neg') : 'flat';
+    const p = s.n_trade ? (s.pnl > 0 ? '+' : '') + s.pnl.toFixed(0) + '%' : '·';
+    return `<div class="row" data-f="${s.file}">
+      <span>${s.ticker} <span class="d">${s.date}</span></span>
+      <span><span class="d">${s.n_pass}/${s.n_trig}</span>
+      &nbsp;<span class="p ${cls}">${p}</span></span></div>`;
+  }).join('') || '<div class="row"><span class="d">no sessions match</span></div>';
+  [...document.querySelectorAll('.row[data-f]')].forEach(el =>
+    el.onclick = () => load(el.dataset.f));
+}
+
+function step(n){
+  const rows = visible(); if(!rows.length) return;
+  const i = rows.findIndex(s => cur && s.file === cur.file);
+  load(rows[Math.max(0, Math.min(rows.length-1, (i<0?0:i)+n))].file);
+}
+
+async function load(file){
+  const d = await (await fetch('tape/'+file)).json();
+  d.file = file; cur = d;
+  [...document.querySelectorAll('.row')].forEach(el =>
+    el.classList.toggle('sel', el.dataset.f === file));
+  draw(d);
+}
+
+function draw(d){
+  $('#chart').innerHTML = '';
+  if(chart) { chart.remove(); chart = null; }
+  chart = LWC.createChart($('#chart'), THEME);
+
+  /* ---- pane 0: the underlying ---- */
+  const px = chart.addSeries(LWC.CandlestickSeries, {
+    upColor:'#3fb950', downColor:'#f85149', borderVisible:false,
+    wickUpColor:'#3fb950', wickDownColor:'#f85149',
+  }, 0);
+  px.setData(d.bars.map(b => ({time:b.t, open:b.o, high:b.h, low:b.l, close:b.c})));
+
+  /* ---- pane 1: the series the trigger is actually computed on ---- */
+  const cum = chart.addSeries(LWC.LineSeries, {
+    color:'#58a6ff', lineWidth:2, priceFormat:{type:'volume'},
+    title:'cum net premium',
+  }, 1);
+  cum.setData(d.flow.map(f => ({time:f.t, value:f.cum})));
+  const ema = chart.addSeries(LWC.LineSeries, {
+    color:'#a371f7', lineWidth:1, lineStyle:LWC.LineStyle.Dashed, title:'EMA(5)',
+  }, 1);
+  ema.setData(d.flow.map(f => ({time:f.t, value:f.ema})));
+
+  /* The magnitude gate, drawn both ways: cum flow is signed, the gate is on
+     |cum flow|, so the threshold is a BAND around zero, not a single line.
+     check_flow_threshold: this gate is load-bearing -- p20 costs -9,899 ROE. */
+  const gp = d.gate.min_flow_pct, thr = gp != null ? d.thr[String(gp)] : null;
+  if(thr){
+    for(const sgn of [1,-1])
+      cum.createPriceLine({ price: sgn*thr, color:'#d29922', lineWidth:1,
+        lineStyle:LWC.LineStyle.Dotted, axisLabelVisible:sgn>0,
+        title: sgn>0 ? `p${gp} gate ±${fmtM(thr)}` : '' });
+  }
+
+  /* ---- markers: every crossover, in THREE states ----
+     gated  a gate refused it (regime / hour / flow percentile)
+     guard  it cleared every gate and the ONE-POSITION GUARD refused it.
+            Book-wide that is 6,400 gate-passes against 392 fills, so this is
+            94% of qualifying signals -- and until now it was drawn exactly
+            like a fill, which made the guard's cost invisible.
+     taken  the sequential walk entered on this minute                       */
+  const MK = {
+    gated:{c:'#484f58', s:0.6},
+    guard:{c:'#d29922', s:1.1},
+    taken:{c:null,      s:1.6},
+  };
+  LWC.createSeriesMarkers(px, d.triggers.map(t => {
+    const o = t.outcome || (t.pass_ ? 'taken' : 'gated');   // older tapes
+    const m = MK[o];
+    return {
+      time:t.t,
+      position: t.dir === 'CALL' ? 'belowBar' : 'aboveBar',
+      shape: t.dir === 'CALL' ? 'arrowUp' : 'arrowDown',
+      color: m.c || (t.dir === 'CALL' ? '#3fb950' : '#f85149'),
+      size: m.s,
+      text: o === 'taken' ? fmtM(t.flow) : (o === 'guard' ? '·' : ''),
+    };
+  }));
+
+  /* ---- pane 2: the option leg, where the P&L actually happens ---- */
+  if(d.trades.length){
+    const t0 = d.trades[0];
+    const mid = chart.addSeries(LWC.LineSeries,
+      {color:'#e6edf3', lineWidth:2, title:'option mid'}, 2);
+    mid.setData(t0.path.t.map((t,i) => ({time:t, value:t0.path.mid[i]})));
+    const bid = chart.addSeries(LWC.LineSeries,
+      {color:'#8b949e', lineWidth:1, title:'bid'}, 2);
+    bid.setData(t0.path.t.map((t,i) => ({time:t, value:t0.path.bid[i]})));
+    if(t0.path.trail){
+      const tl = chart.addSeries(LWC.LineSeries, {color:'#f85149', lineWidth:1,
+        lineStyle:LWC.LineStyle.Dashed, title:'trail stop'}, 2);
+      tl.setData(t0.path.t.map((t,i) => ({time:t, value:t0.path.trail[i]})));
+    }
+    mid.createPriceLine({price:t0.entry, color:'#a371f7', lineWidth:1,
+      lineStyle:LWC.LineStyle.Solid, axisLabelVisible:true, title:'entry'});
+    LWC.createSeriesMarkers(mid, d.trades.flatMap(x => ([
+      {time:x.entry_t, position:'belowBar', shape:'circle', color:'#a371f7',
+       text:'IN '+x.strike},
+      {time:x.exit_t, position:'aboveBar', shape:'square',
+       color: x.pnl>0 ? '#3fb950' : '#f85149',
+       text:`${x.tag} ${(x.pnl*100>0?'+':'')}${(x.pnl*100).toFixed(0)}%`},
+    ])));
+  }
+
+  for(const o of OVERLAYS) o(chart, d);
+
+  const panes = chart.panes();
+  if(panes[0]) panes[0].setHeight(300);
+  if(panes[1]) panes[1].setHeight(170);
+  if(panes[2]) panes[2].setHeight(170);
+  chart.timeScale().fitContent();
+
+  /* ---- header + legend ---- */
+  const r = d.regime, g = d.gate;
+  const pnl = d.trades.reduce((s,x)=>s+x.pnl,0)*100;
+  $('#bar').innerHTML = `
+    <b>${d.ticker}</b> <span class="k">${d.date}</span>
+    <span class="tag">${half(d.date)}</span>
+    <span class="k">rule</span> <b>${d.rule}</b>
+    <span class="k">regime</span>
+    <span class="tag">${r.vol||'—'}</span><span class="tag">${r.trend||'—'}</span>
+    <span class="tag">${r.gex||'—'} GEX</span><span class="tag">amp ${r.amp??'—'}</span>
+    <span class="k">gate</span>
+    <span class="tag">p${g.min_flow_pct ?? '—'}${thr?' = ±'+fmtM(thr):''}</span>
+    <span class="tag">hrs ${(g.hours||[]).join(',')||'—'}</span>
+    <span class="k">crossovers</span>
+    <b>${d.triggers.filter(t=>t.pass_).length}/${d.triggers.length}</b>
+    ${d.trades.length ? `<span class="k">filled</span>
+      <b style="color:${pnl>0?'var(--up)':'var(--dn)'}">
+      ${pnl>0?'+':''}${pnl.toFixed(1)}%</b>
+      <span class="tag">${d.trades[0].tag}</span>` :
+      '<span class="k">no fill — gates or the open-position guard refused every crossover</span>'}`;
+  const nG = d.triggers.filter(t => (t.outcome||'') === 'guard').length;
+  const nT = d.triggers.filter(t => (t.outcome||'') === 'taken').length;
+  $('#legend').innerHTML = `
+    <div class="hd"><span>chart key — historical</span>
+      <span>k or click to dismiss</span></div>
+    <span><i style="background:#3fb950"></i>TAKEN (${nT})</span>
+    <span><i style="background:#d29922"></i>cleared every gate, refused by the
+      open-position guard (${nG})</span>
+    <span><i style="background:#484f58"></i>refused by a gate</span>
+    <span><i style="background:#58a6ff"></i>cumulative net premium</span>
+    <span><i style="background:#a371f7"></i>EMA(5) — the crossing line</span>
+    <span><i style="background:#d29922"></i>p${g.min_flow_pct??'—'} magnitude gate</span>
+    <span><i style="background:#f85149"></i>trail stop</span>
+    <span style="margin-left:auto">j or ↑ ↓ to step sessions</span>`;
+}
+
+/* ===================== LIVE MODE =====================================
+   Polls live/state.json, which bot_runner writes from its OWN objects every
+   5s (live_state.py). Nothing here recomputes the trigger -- the flow series
+   and its EMA come out of FlowMomentumTracker.closed_series, so what is drawn
+   is by construction what the bot decided on.
+   Phase 1 shows flow + EMA + the live percentile gate + position state.
+   Price candles need 1m OHLC in the emit, which costs UW calls -- phase 2.  */
+let LIVE = null, liveTimer = null, liveTk = null, liveSeries = null;
+let LIVEVOL = {};        // et_stamp -> [volume, rvol], for the crosshair readout
+
+function liveStop(){
+  clearInterval(liveTimer); liveTimer = null; LIVE = null; liveSeries = null;
+  $('#liveBtn').classList.remove('on'); $('#liveBtn').textContent = '● GO LIVE';
+  $('#liveInfo').textContent = '';
+  // the order desk is meaningless without a live engine behind it
+  SEL = null; openTk = null; HOLDSEL = null; disarmFire(); disarmPanic();
+  $('#stage').style.display = 'none'; $('#telem').style.display = 'none';
+  if(cur) draw(cur); else renderList();
+}
+
+async function livePoll(){
+  let d;
+  try { const r = await fetch('live/state.json?t='+Date.now());
+        if(!r.ok) throw 0; d = await r.json(); }
+  catch {
+    $('#liveInfo').textContent = 'no live/state.json — run live_sync.py';
+    return;
+  }
+  LIVE = d;
+  const age = Math.max(0, Math.round(Date.now()/1000 - d.ts));
+  $('#liveInfo').textContent =
+    `${d.session} · ${d.n_open} open · ${age}s ago` + (age > 60 ? ' ⚠ STALE' : '');
+  const tks = Object.keys(d.tickers).sort();
+  if(!tks.length){ $('#liveInfo').textContent += ' · no tickers yet'; return; }
+  if(!liveTk || !tks.includes(liveTk)) liveTk = tks[0];
+  liveList(d);
+  renderStage();
+  renderHold();
+  liveDraw(d, d.tickers[liveTk]);
+}
+
+function liveDraw(d, s){
+  if(!liveSeries){
+    $('#chart').innerHTML = '';
+    if(chart){ chart.remove(); chart = null; }
+    chart = LWC.createChart($('#chart'), THEME);
+    /* pane 0 = underlying, pane 1 = flow. Same order as the historical view,
+       and the two share an x-axis because live_state buckets price on the same
+       closed-minute grid the flow tracker uses.                             */
+    const px = chart.addSeries(LWC.LineSeries,
+      {color:'#e6edf3', lineWidth:2, title:'underlying'}, 0);
+    /* Session VWAP, anchored 09:30 and computed from UW 1m volume on a
+       background thread in live_state -- NOT from the tick stream, which
+       carries price only and would give a plain average wearing VWAP's name. */
+    const vw = chart.addSeries(LWC.LineSeries,
+      {color:'#e3b341', lineWidth:2, title:'VWAP'}, 0);
+    /* Volume as an OVERLAY on the price pane (priceScaleId:'' gives it its own
+       invisible scale), pinned to the bottom 22% -- "across the bottom of the
+       price window", not a pane of its own. Colour carries the TIME-OF-DAY
+       RVOL so the ratio is readable without hovering.                        */
+    const vol = chart.addSeries(LWC.HistogramSeries, {
+      priceScaleId:'', priceFormat:{type:'volume'}, title:'vol',
+      lastValueVisible:false, priceLineVisible:false,
+    }, 0);
+    vol.priceScale().applyOptions({scaleMargins:{top:0.78, bottom:0}});
+    const cum = chart.addSeries(LWC.LineSeries, {color:'#58a6ff', lineWidth:2,
+      priceFormat:{type:'volume'}, title:'cum net premium'}, 1);
+    const ema = chart.addSeries(LWC.LineSeries, {color:'#a371f7', lineWidth:1,
+      lineStyle:LWC.LineStyle.Dashed, title:'EMA(5)'}, 1);
+    /* The filtered line: sweeps only, single-leg, opening. Its OWN price scale
+       (priceScaleId:'sweep') because /flow-alerts is an alert feed rather than
+       the tape -- the two series are comparable in shape and turning points,
+       never in level. Sharing a scale would make the sparse one look flat.   */
+    const swp = chart.addSeries(LWC.LineSeries, {
+      color:'#ff7b72', lineWidth:2, priceScaleId:'sweep',
+      priceFormat:{type:'volume'}, title:'sweeps only',
+    }, 1);
+    liveSeries = {px, vw, vol, cum, ema, swp, lines:[], gexLines:[]};
+  }
+  /* Closed minutes PLUS the forming one. Without the forming point the line
+     trailed the market by up to a minute while the `underlying` readout
+     beside it was current -- the chart and the number disagreed. Flow and
+     EMA deliberately stay closed-only: the trigger is defined there. */
+  const pxData = (s.px || []).map(([t,v]) => ({time:t, value:v}));
+  if(s.px_live){
+    const [lt, lv] = s.px_live;
+    if(!pxData.length || lt > pxData[pxData.length-1].time)
+      pxData.push({time:lt, value:lv});
+  }
+  liveSeries.px.setData(pxData);
+  /* 🚨 NO SEPARATE "live" PRICE LINE. There was one, and it printed the same
+     number as the series' own `underlying` label one row above it. It made
+     sense when _closed_px dropped the forming minute and the line trailed the
+     market by ~96s -- then the two genuinely differed. px_live closed that
+     gap, which made the extra line a duplicate of the thing it was
+     compensating for. Two fixes for one problem, and the second outlived the
+     bug. The series terminates at the live price and labels itself. */
+  liveSeries.vw.setData((s.vwap || []).map(([t,v]) => ({time:t, value:v})));
+  /* RVOL bands. Per-minute volume has a CV near 0.9 across sessions, so 2x is
+     only about +1 SD -- the thresholds are set so "bright" means genuinely
+     unusual rather than merely above average.                                */
+  const RV = r => r == null ? '#30363d'
+          : r >= 3 ? '#f85149' : r >= 2 ? '#e3b341'
+          : r >= 1.5 ? '#3fb950' : r >= 1 ? '#2a6f3f' : '#30363d';
+  liveSeries.vol.setData((s.vol || []).map(([t,v,r]) =>
+    ({time:t, value:v, color:RV(r)})));
+  LIVEVOL = {};
+  for(const [t,v,r] of (s.vol || [])) LIVEVOL[t] = [v, r];
+  liveSeries.cum.setData(s.flow.map(([t,v]) => ({time:t, value:v})));
+  liveSeries.ema.setData(s.ema.map(([t,v]) => ({time:t, value:v})));
+  liveSeries.swp.setData((s.sweep || []).map(([t,v]) => ({time:t, value:v})));
+  /* The magnitude gate is on |cum flow|, so it is a BAND, not a line. This is
+     the number check_flow_threshold showed is load-bearing, and it MOVES
+     during the session as the bot's own crossover history grows.            */
+  /* ---- GEX: 0-1DTE heat by strike, and the all-OI major levels ----
+     Lightweight Charts has no heatmap series, but price lines accept rgba --
+     so intensity is carried in the ALPHA of a single green, which reads as a
+     heat band without a custom renderer. Walls are dashed so they cannot be
+     confused with the heat.                                                  */
+  for(const l of (liveSeries.gexLines||[])) liveSeries.px.removePriceLine(l);
+  liveSeries.gexLines = [];
+  const G = s.gex;
+  if(G){
+    const heat = G.heat || [];
+    const mx = Math.max(1, ...heat.map(([,v]) => Math.abs(v)));
+    for(const [k, v] of heat){
+      const a = Math.max(0.06, Math.min(1, Math.abs(v)/mx));
+      liveSeries.gexLines.push(liveSeries.px.createPriceLine({
+        price:k, color:`rgba(63,185,80,${a.toFixed(3)})`,
+        lineWidth: a > 0.55 ? 3 : (a > 0.25 ? 2 : 1),
+        lineStyle: LWC.LineStyle.Solid,
+        axisLabelVisible: a > 0.55,
+        title: a > 0.55 ? `γ ${fmtM(v)}` : '',
+      }));
+    }
+    const W = G.walls || {};
+    for(const [key, col, lbl] of [
+        ['call_wall','#58a6ff','call wall'],
+        ['put_wall','#f85149','put wall'],
+        ['gamma_flip','#d29922','gamma flip']]){
+      if(W[key] == null) continue;
+      liveSeries.gexLines.push(liveSeries.px.createPriceLine({
+        price:W[key], color:col, lineWidth:2,
+        lineStyle:LWC.LineStyle.Dashed, axisLabelVisible:true,
+        title:`${lbl} ${W[key]}`,
+      }));
+    }
+  }
+
+  for(const l of liveSeries.lines) liveSeries.cum.removePriceLine(l);
+  liveSeries.lines = [];
+  if(s.thr) for(const sg of [1,-1])
+    liveSeries.lines.push(liveSeries.cum.createPriceLine({
+      price: sg*s.thr, color:'#d29922', lineWidth:1,
+      lineStyle:LWC.LineStyle.Dotted, axisLabelVisible:sg>0,
+      title: sg>0 ? `p${s.min_flow_pct??'?'} gate ±${fmtM(s.thr)}` : ''}));
+  const lp = chart.panes();
+  if(lp[0]) lp[0].setHeight(300);
+  if(lp[1]) lp[1].setHeight(220);
+  chart.timeScale().fitContent();
+
+  /* The RVOL number, at the bar. Hovering reads that minute; not hovering
+     reads the latest closed minute, so it is always on screen somewhere. */
+  chart.subscribeCrosshairMove(p => {
+    const hit = p && p.time != null ? LIVEVOL[p.time] : null;
+    const last = (s.vol || []).length ? s.vol[s.vol.length-1] : null;
+    const [v, r] = hit || (last ? [last[1], last[2]] : [null, null]);
+    const el = $('#volRead');
+    if(!el) return;
+    el.innerHTML = v == null ? '' :
+      `<span class="k">${hit ? hhmm(p.time) : 'last'}</span> vol <b>${fmtM(v)}</b>` +
+      (r == null ? ' <span class="k">rvol —</span>'
+        : ` · <b style="color:${RV(r)}">RVOL ${r.toFixed(2)}×</b>`);
+  });
+
+  const p = s.position, r = s.regime || {};
+  $('#bar').innerHTML = `
+    <b style="color:var(--dn)">● LIVE</b> <b>${liveTk}</b>
+    <span class="tag">${s.rule||'no rule'}</span>
+    <span class="k">regime</span>
+    <span class="tag">${r.vol||'—'}</span><span class="tag">${r.trend||'—'}</span>
+    <span class="tag">${r.gex||'—'} GEX</span><span class="tag">amp ${r.amp??'—'}</span>
+    <span id="volRead"></span>
+    <span class="k">cum</span><b>${fmtM(s.cum||0)}</b>
+    <span class="k">gate</span><b>±${s.thr?fmtM(s.thr):'—'}</b>
+    <span class="tag">${d.dry_run?'PAPER':'LIVE MONEY'}</span>
+    ${p ? `<span class="k">pos</span><b>${p.dir} ${p.strike} ${p.dte}DTE</b>
+      <span class="k">entry</span>${p.entry} <span class="k">bid</span>${p.bid}
+      <span class="k">trail</span>${p.trail ?? '—'}
+      <b style="color:${p.roe>0?'var(--up)':'var(--dn)'}">
+      ${p.roe>0?'+':''}${p.roe ?? '?'}%</b>`
+      : `<span class="k">${s.state}</span>`}`;
+  $('#legend').innerHTML = `
+    <div class="hd"><span>chart key — live</span>
+      <span>k or click to dismiss</span></div>
+    <span><i style="background:#e6edf3"></i>underlying${
+      s.spot ? ' ' + s.spot : ''}${
+      (s.px||[]).length ? '' : ' (filling — starts when the bot starts)'}</span>
+    <span><i style="background:#e3b341"></i>VWAP${
+      (s.vwap||[]).length ? ' (session, from 09:30)'
+                          : ' — waiting for first poll (up to 2 min)'}</span>
+    <span><i style="background:#3fb950"></i>volume — colour is time-of-day RVOL${
+      s.rvol_days ? ` vs ${s.rvol_days}d median of that minute` : ' (baseline building)'}
+      · <span style="color:#2a6f3f">1×</span>
+      <span style="color:#3fb950">1.5×</span>
+      <span style="color:#e3b341">2×</span>
+      <span style="color:#f85149">3×+</span></span>
+    <span><i style="background:#3fb950"></i>GEX heat 0-1DTE${
+      (s.gex && (s.gex.heat||[]).length)
+        ? ` (${s.gex.heat.length} strikes, ±3%)`
+        : ' — waiting for first poll (up to 10 min)'}</span>
+    <span><i style="background:#58a6ff"></i>call wall</span>
+    <span><i style="background:#f85149"></i>put wall</span>
+    <span><i style="background:#d29922"></i>gamma flip${
+      s.gex && s.gex.src ? ` (${s.gex.src})` : ''}</span>
+    <span><i style="background:#58a6ff"></i>cumulative net premium</span>
+    <span><i style="background:#a371f7"></i>EMA(5) — crossings are the trigger</span>
+    <span><i style="background:#ff7b72"></i>sweeps only${
+      (s.sweep||[]).length ? ` (${s.sweep.length} min, own scale)`
+                           : ' — waiting for alerts'} · ISO, single-leg, opening</span>
+    <span><i style="background:#d29922"></i>p${s.min_flow_pct??'?'} magnitude gate (live, moves)</span>
+    ${s.state==='holding' ? `<span style="color:var(--put)">⚠ flow tracking is
+      PAUSED while a position is open (bot_runner.py:1708 skips busy tickers) —
+      the series is frozen, not quiet</span>` : ''}
+    <span style="margin-left:auto"><b>n</b> = log a read · price to the
+      forming minute, flow on closed bars · ${
+      LIVE ? Math.max(0, Math.round(Date.now()/1000 - LIVE.ts)) : '?'}s since
+      the engine wrote</span>`;
+}
+
+$('#liveBtn').onclick = () => {
+  if(liveTimer) return liveStop();
+  $('#liveBtn').classList.add('on');
+  $('#liveBtn').textContent = '■ STOP LIVE';
+  liveSeries = null;
+  $('#telem').style.display = 'flex';
+  livePoll(); pollEvents();
+  liveTimer = setInterval(() => { livePoll(); pollEvents(); }, 5000);
+};
+
+/* ===================== ORDER DESK ====================================
+   Three pieces, all reading the SAME live/state.json the chart reads:
+     1. the strike strip  -- d.chains[tk], the contracts the bot already has
+                             MQTT quotes for. No new subscriptions; if it is
+                             not on the chart it is not tradeable here.
+     2. the staging area  -- caps, premium, the two buttons
+     3. guard telemetry   -- /events, i.e. the request files and the bot's
+                             verdicts on them
+
+   🚨 NOTHING HERE PLACES AN ORDER, and nothing here is a safety check.
+   A POST to /order writes a request file. bot_runner picks it up and
+   manual_orders.py re-validates every one of these limits against its own
+   live quotes before sending. The caps in this panel exist so you cannot
+   *submit* something that will obviously be refused -- they are the UI, the
+   guard is the engine, and they are deliberately not the same code.       */
+let ORDER = {key:'', max_contracts:20, max_premium:5000};
+let openTk = null;      // which ticker's strike strip is dropped down
+let SEL = null;         // {tk, id} -- resolved against live chains every poll
+let armFire = null;     // right ('C'/'P') currently one click from sending
+let armTimer = null;
+
+fetch('/order-config').then(r => r.json())
+  .then(j => { ORDER = Object.assign(ORDER, j); })
+  .catch(() => {});
+
+const esc = s => String(s ?? '').replace(/[&<>"]/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+// a half-written emit must degrade to a dash, not throw inside the render and
+// leave the whole desk blank with an open position on screen
+const px2 = v => (typeof v === 'number' && isFinite(v)) ? v.toFixed(2) : '—';
+
+/* ---- 1. the 0DTE strike strip ---- */
+function liveList(d){
+  const ch = d.chains || {};
+  $('#list').innerHTML = Object.keys(d.tickers).sort().map(t => {
+    const s = d.tickers[t], p = s.position, n = (ch[t] || []).length;
+    const roe = p && p.roe != null
+      ? `<span class="p ${p.roe>0?'pos':'neg'}">${p.roe>0?'+':''}${p.roe}%</span>`
+      : `<span class="d">${s.state}</span>`;
+    return `<div class="tkrow ${t===liveTk?'sel':''}" data-lt="${t}">
+      <span>${n ? `<span class="car">${t===openTk?'▾':'▸'}</span>` : ''}${t}
+        <span class="d">${s.rule||'—'}</span></span>${roe}</div>` +
+      (t === openTk && n ? strikeStrip(t, ch[t]) : '');
+  }).join('');
+  [...document.querySelectorAll('.tkrow[data-lt]')].forEach(el =>
+    el.onclick = () => {
+      const t = el.dataset.lt;
+      if(t !== liveTk){ liveTk = t; liveSeries = null; }
+      // only the three tradeable ETFs carry a chain, so only they drop down
+      openTk = ((LIVE.chains||{})[t] || []).length && openTk !== t ? t : null;
+      livePoll();
+    });
+  [...document.querySelectorAll('tr[data-oid]')].forEach(el =>
+    el.onclick = ev => {
+      ev.stopPropagation();              // the row sits inside the ticker row
+      SEL = {tk: el.dataset.tk, id: el.dataset.oid};
+      disarmFire(); $('#ordMsg').textContent = '';
+      liveList(LIVE); renderStage();
+    });
+}
+
+const dteLbl = x => x.dte == null ? (x.expiry || '?') : x.dte + 'DTE';
+
+function strikeStrip(tk, rows){
+  const row = x => {
+    /* The visual guard the spec asks for: blue ATM, green ITM, red OTM.
+       `itm` and `atm` are computed ENGINE-side against the same spot the
+       strike selector uses, so the colour cannot drift from the bot's
+       own idea of where the money is. */
+    const cls = x.atm ? 'k-atm' : (x.itm ? 'k-itm' : 'k-otm');
+    const on = SEL && SEL.id === x.id ? ' k-sel' : '';
+    return `<tr class="${cls}${on}" data-oid="${esc(x.id)}" data-tk="${tk}">
+      <td>${x.strike}</td>
+      <td>${px2(x.bid)}/${px2(x.ask)}</td>
+      <td>${x.vol != null ? fmtM(x.vol) : '—'}</td>
+      <td>${x.oi != null ? fmtM(x.oi) : '—'}</td></tr>`;
+  };
+  const side = (r, lbl, col) => {
+    const mine = rows.filter(x => x.right === r);
+    if(!mine.length) return '';
+    /* GROUPED BY EXPIRY. QQQ and IWM carry 0DTE and 1DTE at the same time, so
+       an ungrouped strip repeats every strike with nothing on the row to say
+       which expiry it is -- and the two are not remotely the same trade. */
+    const exps = [...new Set(mine.map(x => x.expiry))].sort();
+    /* `bot:false` = tracked for the hand only (SPY/QQQ/IWM puts). Worth
+       saying: it means the bot will never enter this side by itself, so a
+       position here is entirely yours to manage until the 15:55 flatten. */
+    const manual = mine[0].bot === false
+      ? ` <span style="color:var(--accent)">· manual only</span>` : '';
+    return exps.map((e, i) => {
+      const g = mine.filter(x => x.expiry === e);
+      return `<tr><th colspan="4" style="text-align:left;color:${col}">${lbl}
+        <span style="color:var(--dim)">${dteLbl(g[0])}</span>${
+        i ? '' : manual}</th></tr>` + g.map(row).join('');
+    }).join('');
+  };
+  return `<div class="strikes"><table>
+    <tr><th>strike</th><th>bid/ask</th><th>vol</th><th>oi</th></tr>
+    ${side('C','CALLS','#3fb950')}${side('P','PUTS','#f85149')}</table></div>`;
+}
+
+/* ---- 2. staging ---- */
+function selContract(){
+  if(!SEL || !LIVE) return null;
+  return ((LIVE.chains || {})[SEL.tk] || []).find(x => x.id === SEL.id) || null;
+}
+/* Qty lives in a variable, not in the DOM. The slider and the number box both
+   write it and both read it back; reading it out of #qtyN inside the slider's
+   own handler gave the PREVIOUS value, so the premium shown lagged the slider
+   by one drag step -- which is exactly the number the $5,000 cap is checked
+   against. The engine re-checks it, but a lagging figure on screen is the
+   wrong kind of wrong. */
+let QTY = 1;
+const qtyVal = () => QTY;
+function setQty(v){
+  QTY = Math.max(1, Math.min(ORDER.max_contracts || 20, parseInt(v, 10) || 1));
+  $('#qtyR').value = QTY; $('#qtyN').value = QTY;
+}
+
+function renderStage(){
+  const c = selContract();
+  if(!SEL){ $('#stage').style.display = 'none'; return; }
+  $('#stage').style.display = 'flex';
+
+  /* 🚨 ARMED MEANS REAL. There is no "armed but pretend" state any more:
+     MANUAL_TRADING_ARMED decides whether YOUR orders are real, DRY_RUN
+     decides whether the BOT's are, and the two no longer interact. So the
+     banner is binary, and the bot's own state is context on a subline rather
+     than a third colour that could be read as "this is safe". Both values
+     come from the ENGINE's emit, never from this page's own config. */
+  const armed = !!(LIVE && LIVE.armed);
+  const capable = !!(LIVE && LIVE.arm_capable);
+  const left = (LIVE && LIVE.arm_secs_left) || 0;
+  const dry = !(LIVE && LIVE.dry_run === false);
+  const ban = $('#stageBan');
+  ban.className = armed ? 'live' : 'off';
+  /* Three states now, because the window expires: no capability at all
+     (config), capability but a closed window, and armed with a countdown.
+     The banner must say what _execute will DO, not what config.py says. */
+  ban.innerHTML = armed
+    ? `⚠ ARMED: LIVE CAPITAL — ${Math.floor(left/60)}:${
+       String(Math.floor(left%60)).padStart(2,'0')} LEFT
+       <div style="font-weight:400;font-size:10px;letter-spacing:.03em;
+       opacity:.8;margin-top:4px">bot is ${dry ? 'PAPER' : 'LIVE'} ·
+       arming governs your orders only</div>`
+    : capable
+      ? `WINDOW CLOSED — ARM TO TRADE<div style="font-weight:400;
+         font-size:10px;opacity:.8;margin-top:4px">the capability is on;
+         the window expires on its own</div>`
+      : `DISARMED — MANUAL_TRADING_ARMED is False`;
+
+  if(!c){
+    $('#stageHdr').textContent = `${SEL.tk} — contract quote lost`;
+    for(const id of ['#sBa','#sSp','#sVo','#sLim']) $(id).textContent = '—';
+    $('#prem').textContent = '—';
+    return gate([], 'the quote for this contract dropped out of the feed');
+  }
+  const qty = qtyVal(), prem = (c.ask || 0) * qty * 100;
+  /* The cap comes from the ENGINE, computed off REAL account cash -- not
+     from ORDER.max_premium (a static $5,000 from /order-config) and not from
+     `equity`, which under DRY_RUN is the $30k paper bankroll. On a small
+     account the static number was larger than the account itself. */
+  const capDollars = (LIVE && LIVE.manual_cap) || ORDER.max_premium;
+  /* Expiry AND dte, spelled out. A 0DTE and a 1DTE at the same strike differ
+     only in the date string, and that is the mistake worth a few pixels. */
+  $('#stageHdr').innerHTML =
+    `${SEL.tk} <b style="color:${c.right==='C'?'var(--up)':'var(--dn)'}">${
+      c.strike}${c.right}</b> <span class="d">${dteLbl(c)} ${c.expiry||''}${
+      c.bot === false ? ' · manual only' : ''}</span>`;
+  $('#sBa').textContent = `${px2(c.bid)} / ${px2(c.ask)}`;
+  $('#sSp').innerHTML = c.spread_pct == null ? '—'
+    : `<span style="color:${c.spread_pct > 15 ? 'var(--dn)' : 'var(--fg)'}">${
+        c.spread_pct}%</span>`;
+  $('#sVo').textContent = `${c.vol != null ? fmtM(c.vol) : '—'} / ${
+    c.oi != null ? fmtM(c.oi) : '—'}`;
+  $('#sLim').textContent = px2(c.limit);
+  $('#prem').innerHTML = '$' + prem.toLocaleString(undefined,
+    {maximumFractionDigits: 0}) +
+    `<div style="font-size:10px;font-weight:400;color:var(--dim);
+      letter-spacing:.02em;margin-top:2px">cap $${
+      capDollars.toLocaleString(undefined, {maximumFractionDigits: 0})}${
+      LIVE && LIVE.manual_cap_basis ? ' · ' + esc(LIVE.manual_cap_basis)
+                                    : ''}</div>`;
+  $('#prem').classList.toggle('over', prem > capDollars);
+
+  /* Say WHY a button is dead. A greyed button with no reason sends you
+     hunting through the guard source at exactly the wrong moment. */
+  /* The arm control. Disabled outright when the capability is off, because
+     arming would be refused by the engine anyway and a button that does
+     nothing is worse than one that is visibly unavailable. */
+  const ab = $('#armBtn');
+  ab.disabled = !capable;
+  ab.textContent = !capable ? 'ARMING UNAVAILABLE (config)'
+    : armed ? `DISARM  (${Math.floor(left/60)}:${
+        String(Math.floor(left%60)).padStart(2,'0')})`
+    : `ARM FOR ${Math.round((LIVE.arm_window_s||900)/60)} MIN`;
+  ab.style.borderColor = armed ? 'var(--dn)' : 'var(--up)';
+  ab.style.color = armed ? 'var(--dn)' : 'var(--up)';
+
+  const why = [];
+  if(!capable) why.push('MANUAL_TRADING_ARMED is False in config.py');
+  else if(!armed) why.push('the arming window is closed — press ARM');
+  if(prem > capDollars)
+    why.push(`premium over the $${capDollars.toLocaleString(undefined,
+      {maximumFractionDigits:0})} cap${
+      LIVE && LIVE.manual_cap_basis ? ' (' + LIVE.manual_cap_basis + ')' : ''}`);
+  if(c.spread_pct != null && c.spread_pct > 15)
+    why.push(`spread ${c.spread_pct}% of mid — the engine refuses over 15%`);
+  const held = (LIVE.manual || {})[SEL.tk];
+  if(held) why.push(`${SEL.tk} already held manually — close it first`);
+  const bot = (LIVE.tickers[SEL.tk] || {}).position;
+  if(bot) why.push(`${SEL.tk} is held by the BOT — the entry block will refuse`);
+  gate(why, null, c.right);
+}
+
+function gate(why, note, right){
+  const dead = why.length > 0;
+  for(const [id, r] of [['#buyC','C'], ['#buyP','P']]){
+    const b = $(id);
+    /* The two buttons are both here because both sides are real trades, but
+       only the side you actually SELECTED can fire. Firing the other one
+       would have to silently swap the contract out from under the strike
+       you clicked, which is the one thing an order panel must never do. */
+    b.disabled = dead || right !== r;
+    b.textContent = armFire === r ? `CONFIRM ${r==='C'?'BUY CALL':'BUY PUT'}`
+                                  : (r === 'C' ? 'BUY CALL' : 'BUY PUT');
+  }
+  $('#blk').innerHTML = note ? esc(note)
+    : why.map(w => '⛔ ' + esc(w)).join('<br>') ||
+      (right ? `<span style="color:var(--dim)">ready — sends a marketable
+        limit for the contract above. The ${right==='C'?'PUT':'CALL'} button
+        needs a ${right==='C'?'put':'call'} row selected.</span>` : '');
+}
+
+function disarmFire(){
+  armFire = null;
+  if(armTimer){ clearTimeout(armTimer); armTimer = null; }
+}
+
+async function fire(right){
+  const c = selContract();
+  if(!c || c.right !== right) return;
+  /* Live capital gets a second click. Armed IS live now, so this fires on
+     `armed` alone -- it used to also require dry_run===false, which after
+     the decoupling would have skipped the confirm on exactly the
+     configuration this rollout runs in (armed hand, paper bot). */
+  if(LIVE && LIVE.armed && armFire !== right){
+    armFire = right; renderStage();
+    armTimer = setTimeout(() => { disarmFire(); renderStage(); }, 4000);
+    $('#ordMsg').textContent = 'click again within 4s to send — LIVE CAPITAL';
+    return;
+  }
+  disarmFire();
+  const body = {ticker: SEL.tk, option_id: c.id, qty: qtyVal(),
+    strike: c.strike, expiry: c.expiry, right: c.right,
+    note: $('#ordNote').value.trim().slice(0, 200)};
+  $('#ordMsg').textContent = 'queuing…';
+  try {
+    const r = await fetch('/order', {method:'POST', headers:{
+      'Content-Type':'application/json', 'X-Order-Key': ORDER.key || ''},
+      body: JSON.stringify(body)});
+    const j = await r.json();
+    $('#ordMsg').textContent = j.ok
+      ? `queued ${j.queued} — waiting on the bot's verdict (telemetry, below left)`
+      : 'REFUSED by the server: ' + (j.err || '?');
+  } catch(e){
+    $('#ordMsg').textContent = 'post failed: ' + e.message +
+      ' (serve_viewer.py, not a bare http.server?)';
+  }
+  renderStage(); pollEvents();
+}
+
+$('#armBtn').onclick = async () => {
+  if(!LIVE || !LIVE.arm_capable) return;
+  const b = $('#armBtn');
+  b.disabled = true;
+  b.textContent = LIVE.armed ? 'disarming…' : 'arming…';
+  await postOrder(LIVE.armed ? {action:'disarm'} : {action:'arm'});
+  pollEvents();
+  livePoll();                 // reflect the new window immediately
+};
+
+$('#buyC').onclick = () => fire('C');
+$('#buyP').onclick = () => fire('P');
+$('#stageX').onclick = () => {
+  SEL = null; disarmFire(); $('#stage').style.display = 'none';
+  if(LIVE) liveList(LIVE);
+};
+for(const id of ['#qtyR', '#qtyN'])
+  $(id).oninput = () => { setQty($(id).value); disarmFire(); renderStage(); };
+
+/* ---- 3. guard telemetry ---- */
+async function pollEvents(){
+  let ev;
+  try { const r = await fetch('/events?t=' + Date.now()); ev = await r.json(); }
+  catch { return; }
+  const f = $('#feed');
+  const stick = f.scrollTop + f.clientHeight >= f.scrollHeight - 24;
+  f.innerHTML = ev.map(e => {
+    const t = e.at ? new Date(e.at*1000)
+      .toLocaleTimeString('en-US', {hour12:false}) : '--:--:--';
+    return `<div><span class="t">[${t}]</span> <span class="${e.kind}">${
+      e.kind}:</span> ${esc(e.msg)}</div>`;
+  }).join('') ||
+    '<div style="padding:4px 12px;color:var(--fail)">no order activity</div>';
+  $('#telemN').textContent = ev.length ? ev.length + ' events' : '';
+  if(stick) f.scrollTop = f.scrollHeight;
+}
+
+/* ---- exits. Select a manual hold, then close it; or 911 everything. ----
+   The two exits differ ONLY in the limit price, and the limit is not the
+   price you get -- a marketable SELL fills against the resting bid. So 911
+   is not "sell for half": it is "sell even if the bid halves on the way".
+   See manual_orders._exit_price.                                          */
+let HOLDSEL = null;     // ticker of the selected manual hold
+let panicArm = false, panicTimer = null;
+
+const liveBid = (tk, oid) => {
+  const r = ((LIVE && LIVE.chains || {})[tk] || []).find(x => x.id === oid);
+  return r ? r.bid : null;
+};
+
+function panicScope(){
+  const out = [];
+  for(const [t, p] of Object.entries((LIVE && LIVE.manual) || {}))
+    out.push(`${t} ${p.qty}x manual`);
+  for(const [t, s] of Object.entries((LIVE && LIVE.tickers) || {}))
+    if(s.position) out.push(`${t} bot`);
+  return out;
+}
+
+function disarmPanic(){
+  panicArm = false;
+  if(panicTimer){ clearTimeout(panicTimer); panicTimer = null; }
+  const b = $('#x911');
+  if(b){ b.classList.remove('hot'); b.textContent = '911'; }
+  const m = $('#panicMsg');
+  if(m){ m.style.display = 'none'; m.textContent = ''; }
+}
+
+function renderHold(){
+  if(!LIVE) return;
+  const m = LIVE.manual || {};
+  if(HOLDSEL && !m[HOLDSEL]){ HOLDSEL = null; disarmPanic(); }
+  const out = [];
+  for(const [t, p] of Object.entries(m)){
+    /* Live P&L off the same MQTT bid the exit will price against, so the
+       number you decide on is the number the order sees. Subscriptions are
+       held for manual positions across a rebalance, so this cannot go blind
+       while the position is open (bot_runner:_rebalance_basket). */
+    const bid = liveBid(t, p.option_id);
+    const roe = (bid != null && p.entry > 0)
+      ? Math.round((bid - p.entry) / p.entry * 100) : null;
+    /* PENDING is not HELD. Until the broker confirms the fill there is no
+       position, the entry price is unknown, and the right "close" is to
+       cancel the order -- so it must never look like a hold with a P&L. */
+    out.push(`<div class="p ${t===HOLDSEL?'on':''}" data-h="${esc(t)}">
+      <span class="${p.pending ? 'bh' : 'mh'}">${p.pending ? '⧗' : '◆'} ${t} ${
+        p.qty}x ${p.strike ?? ''}${p.right ?? ''}
+        <span class="d">${p.pending ? `limit ${px2(p.limit)}`
+                                    : '@ ' + p.entry}${
+          p.dry ? ' DRY' : ''}</span></span>
+      <span>${p.pending
+        ? `<span style="color:var(--put)">${
+            p.cancel_sent ? 'cancelling…' : 'PENDING FILL'}</span>`
+        : `${bid != null ? `<span class="d">bid ${px2(bid)}</span> ` : ''}${
+            roe != null ? `<b style="color:${roe>=0?'var(--up)':'var(--dn)'}">${
+              roe>0?'+':''}${roe}%</b>` : ''}${
+            p.exit_coid ? ` <span style="color:var(--put)">⟳ exit @ ${
+              p.exit_px}</span>` : ''}`}</span></div>`);
+  }
+  for(const [t, s] of Object.entries(LIVE.tickers || {})){
+    const q = s.position;
+    if(!q) continue;
+    out.push(`<div class="p bot"><span class="bh">● BOT ${t} ${q.dir} ${
+      q.strike} <span class="d">${q.dte}DTE @ ${q.entry}</span></span>
+      <b style="color:${q.roe>=0?'var(--up)':'var(--dn)'}">${
+        q.roe>0?'+':''}${q.roe ?? '?'}%</b></div>`);
+  }
+  $('#hold').innerHTML = out.join('') ||
+    '<div class="p none" style="color:var(--fail)">no open position</div>';
+  [...document.querySelectorAll('#hold .p[data-h]')].forEach(el =>
+    el.onclick = () => {
+      HOLDSEL = el.dataset.h === HOLDSEL ? null : el.dataset.h;
+      disarmPanic(); renderHold();
+    });
+
+  $('#exitbar').style.display = out.length ? 'flex' : 'none';
+  const sel = HOLDSEL ? m[HOLDSEL] : null;
+  $('#xMkt').disabled = !sel || !!sel.exit_coid || !!sel.cancel_sent;
+  $('#xMkt').textContent = !HOLDSEL ? 'SELECT A MANUAL POSITION'
+    : sel && sel.cancel_sent ? `${HOLDSEL} CANCELLING`
+    : sel && sel.exit_coid ? `${HOLDSEL} EXIT IN FLIGHT`
+    // nothing is owned yet, so the exit is a cancel, and the button says so
+    : sel && sel.pending ? `CANCEL ${HOLDSEL} ENTRY`
+    : `CLOSE ${HOLDSEL} MARKETABLE`;
+  $('#x911').disabled = !panicScope().length;
+}
+
+async function postOrder(body){
+  try {
+    const r = await fetch('/order', {method:'POST', headers:{
+      'Content-Type':'application/json', 'X-Order-Key': ORDER.key || ''},
+      body: JSON.stringify(body)});
+    return await r.json();
+  } catch(e){ return {ok:false, err:e.message}; }
+}
+
+$('#xMkt').onclick = async () => {
+  if(!HOLDSEL) return;
+  const t = HOLDSEL;
+  $('#xMkt').disabled = true;
+  $('#xMkt').textContent = `closing ${t}…`;
+  await postOrder({ticker:t, action:'close', mode:'marketable'});
+  pollEvents();                 // the verdict lands in the feed below
+};
+
+/* 911 ENUMERATES BEFORE IT FIRES. "Emergency flatten" has to mean everything
+   or it is worse than nothing, so it takes the bot's positions too -- and the
+   one thing you must not discover afterwards is what "everything" included.
+   First click lists it; second click within 5s sends.                      */
+$('#x911').onclick = async () => {
+  const scope = panicScope();
+  if(!scope.length) return;
+  if(!panicArm){
+    panicArm = true;
+    $('#x911').classList.add('hot');
+    $('#x911').textContent = 'FIRE';
+    const m = $('#panicMsg');
+    m.style.display = 'block';
+    m.innerHTML = `<b>911 will flatten ${scope.length}:</b> ${
+      esc(scope.join(' · '))}<br>manual → deep limit · bot → its own exit
+      path (ledger intact) · click FIRE within 5s`;
+    panicTimer = setTimeout(disarmPanic, 5000);
+    return;
+  }
+  disarmPanic();
+  $('#x911').disabled = true;
+  await postOrder({action:'panic'});
+  pollEvents();
+};
+
+/* ===================== DISCRETIONARY NOTES ===========================
+   A rationale recalled AFTER the outcome is unfalsifiable -- the identical
+   setups that failed never get enumerated. Captured here, before the outcome
+   is known, with the full state snapshot attached, it becomes a dataset.
+   PASS entries are as valuable as TAKE ones; that is why the form makes you
+   choose rather than defaulting.                                          */
+let noteDir = null, noteAct = null;
+
+function noteCtx(){
+  if(!LIVE || !liveTk) return null;
+  const s = LIVE.tickers[liveTk] || {};
+  const px = (s.px||[]).length ? s.px[s.px.length-1][1] : null;
+  const vw = (s.vwap||[]).length ? s.vwap[s.vwap.length-1][1] : null;
+  const r = s.regime || {};
+  return {
+    ts: Math.floor(Date.now()/1000), bot_ts: LIVE.ts, session: LIVE.session,
+    ticker: liveTk, rule: s.rule || null, spot: px, vwap: vw,
+    vwap_bp: (px && vw) ? Math.round((px - vw)/vw*1e4*10)/10 : null,
+    cum: s.cum ?? null, gate: s.thr ?? null,
+    gate_pct: (s.cum != null && s.thr) ? Math.round(Math.abs(s.cum)/s.thr*1000)/10 : null,
+    ema: (s.ema||[]).length ? s.ema[s.ema.length-1][1] : null,
+    regime: {vol:r.vol??null, trend:r.trend??null, gex:r.gex??null, amp:r.amp??null},
+    state: s.state || null, n_open: LIVE.n_open,
+  };
+}
+
+function openNote(){
+  const c = noteCtx();
+  if(!c){ $('#liveInfo').textContent = 'go live first — notes capture live state'; return; }
+  noteDir = noteAct = null;
+  [...document.querySelectorAll('#note .dir, #note .act')].forEach(b =>
+    b.classList.remove('sel'));
+  $('#noteWhy').value = '';
+  $('#noteMsg').textContent = 'esc to cancel · ctrl+enter to save';
+  $('#noteCtx').innerHTML =
+    `<b>${c.ticker}</b> ${c.spot ?? '?'} · VWAP ${c.vwap ?? '?'}` +
+    `${c.vwap_bp != null ? ` (${c.vwap_bp>0?'+':''}${c.vwap_bp}bp)` : ''}<br>` +
+    `cum ${fmtM(c.cum||0)} · gate ${c.gate?'±'+fmtM(c.gate):'—'}` +
+    `${c.gate_pct != null ? ` (${c.gate_pct}%)` : ''}<br>` +
+    `${c.regime.vol||'—'} · ${c.regime.trend||'—'} · ${c.regime.gex||'—'} GEX` +
+    ` · amp ${c.regime.amp ?? '—'} · ${c.state}`;
+  $('#noteWrap').style.display = 'flex';
+  setTimeout(() => $('#noteWhy').focus(), 30);
+}
+
+function closeNote(){ $('#noteWrap').style.display = 'none'; }
+
+[...document.querySelectorAll('#note .dir')].forEach(b => b.onclick = () => {
+  noteDir = b.dataset.v;
+  [...document.querySelectorAll('#note .dir')].forEach(x =>
+    x.classList.toggle('sel', x === b));
+});
+[...document.querySelectorAll('#note .act')].forEach(b => b.onclick = () => {
+  noteAct = b.dataset.v;
+  [...document.querySelectorAll('#note .act')].forEach(x =>
+    x.classList.toggle('sel', x === b));
+});
+
+async function saveNote(){
+  if(!noteDir || !noteAct){
+    $('#noteMsg').textContent = 'pick a direction AND take/pass — both matter';
+    return;
+  }
+  const rec = Object.assign(noteCtx(), {
+    dir: noteDir, action: noteAct, why: $('#noteWhy').value.trim(),
+  });
+  try {
+    const r = await fetch('/note', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(rec)});
+    const j = await r.json();
+    if(!j.ok) throw new Error(j.err || 'rejected');
+    closeNote();
+    $('#liveInfo').textContent = `logged ${rec.action} ${rec.ticker} — ${j.n} notes`;
+  } catch(e){
+    $('#noteMsg').textContent = 'save failed: ' + e.message +
+      ' (are you on serve_viewer, not a bare http.server?)';
+  }
+}
+$('#noteSave').onclick = saveNote;
+
+/* The chart key. Hidden by default; `k`, the corner hint, or clicking the
+   panel itself dismisses it. The hint hides while the panel is open so the
+   two never sit on top of each other -- they share a corner. */
+function toggleKey(force){
+  const el = $('#legend');
+  const on = force === undefined ? !el.classList.contains('on') : !!force;
+  el.classList.toggle('on', on);
+  $('#keyHint').style.display = on ? 'none' : 'block';
+}
+$('#keyHint').onclick = () => toggleKey(true);
+$('#legend').onclick = () => toggleKey(false);
+
+addEventListener('keydown', e => {
+  if($('#noteWrap').style.display === 'flex'){
+    if(e.key === 'Escape'){ e.preventDefault(); closeNote(); }
+    if(e.key === 'Enter' && (e.ctrlKey || e.metaKey)){ e.preventDefault(); saveNote(); }
+    return;                                    // never fall through while typing
+  }
+  // the staging panel has a qty box and a note field -- a bare `n` typed into
+  // either used to open the note modal over the top of the order you were
+  // building. Never treat a keystroke inside a field as a shortcut.
+  const t = e.target;
+  if(t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
+           t.isContentEditable)) return;
+  if(e.key === 'Escape' && $('#legend').classList.contains('on')){
+    e.preventDefault(); toggleKey(false); return; }
+  if(e.key === 'Escape' && SEL){ e.preventDefault(); $('#stageX').click(); return; }
+  if(e.key === 'k'){ e.preventDefault(); toggleKey(); return; }
+  if(e.key === 'n'){ e.preventDefault(); openNote(); return; }
+  if(e.key === 'l'){ e.preventDefault(); $('#liveBtn').click(); return; }
+  if(LIVE) return;
+  /* 🚨 `k` NO LONGER STEPS SESSIONS. It used to, guarded by `if(LIVE) return`
+     -- so it meant "previous session" historically and nothing live. A key
+     whose meaning depends on a mode you cannot see is a trap, so it now means
+     the same thing everywhere. `j` and the arrows still cover stepping. */
+  if(['j','ArrowDown'].includes(e.key)){ e.preventDefault(); step(1); }
+  if(e.key === 'ArrowUp'){ e.preventDefault(); step(-1); }
+});
+
+(async function init(){
+  let r;
+  try { r = await fetch('tape/index.json'); if(!r.ok) throw 0; }
+  catch {
+    $('#chart').innerHTML = `<div id="empty"><b>No tape found.</b>
+      <span>Build it, then serve the repo root:</span>
+      <code>python export_flow_tape.py</code>
+      <code>python -m http.server 8765</code>
+      <span>Opening this file directly with <code>file://</code> will not work —
+      fetch() needs the server.</span></div>`;
+    $('#bar').innerHTML = '<span class="k">no data</span>'; return;
+  }
+  IDX = await r.json(); SPLIT = IDX.split;
+  for(const t of [...new Set(IDX.sessions.map(s=>s.ticker))].sort())
+    $('#fTicker').add(new Option(t,t));
+  for(const el of ['#fTicker','#fHalf','#fTraded','#fPass'])
+    $(el).onchange = renderList;
+  renderList();
+  const first = visible()[0];
+  if(first) load(first.file);
+})();
+</script>
+</body>
+</html>

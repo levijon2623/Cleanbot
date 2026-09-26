@@ -1,0 +1,19 @@
+Both write into historical/, from the local lake tool (uw_options_data_lake.py).
+
+1. Daily GEX — seconds
+
+python uw_options_data_lake.py gex-daily-build --tickers QQQ
+One /greek-exposure call. Default --timeframe 10Y grabs everything UW has (caps ~2022-03-30).
+Writes historical/GEXQQQ.parquet with date, call_/put_ greeks, net_gex, net_gex_prior.
+2. 1-min OHLC — a few minutes
+
+python uw_options_data_lake.py ohlc-build 2024-08-20 2026-08-21 --tickers QQQ --confirm
+--confirm required (~500 trading days > the 200-request gate).
+One /stock/QQQ/ohlc/1m?date=D per trading day → historical/QQQ.parquet (merged/incremental, so re-running only fetches gaps).
+Use 2024-08-20 2026-08-21 to line up with the silver lake window the other 9 tickers cover.
+3. Then screen it
+
+python directional_flow_backtester.py --screen --tickers QQQ --split 2025-08-21 --flow-mode pct
+QQQ's flow/bars are already cached in _screen_cache/ from the earlier test, so this run is fast — it just needed the two historical/ files above to do the trend/volume/amp regime lookups. Output is one line: best both-halves cell, or "nothing."
+SLV, SOXL, DRAM
+If a cell looks good, formalize it as a rule in candidate_rules.json, --rule-file candidate_rules.json --split 2025-08-21 to walk it forward, and promote survivors into config.RULES.

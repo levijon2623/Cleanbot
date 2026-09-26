@@ -1,0 +1,61 @@
+# /etc/systemd/system/cleanbot-viewer.service
+#
+# The viewer, bound to this box's TAILSCALE address so your laptop and phone
+# can reach it and nothing else can.
+#
+#   sudo cp deploy/viewer.service /etc/systemd/system/cleanbot-viewer.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cleanbot-viewer
+#
+# 🚨 --bind TAKES THE TAILSCALE IP, NOT 0.0.0.0.
+# serve_viewer refuses 0.0.0.0 outright: /order places real trades over plain
+# HTTP with a bearer header, so binding every interface would put that one
+# guessed string away from the public internet. Inside the Tailscale mesh the
+# transport is encrypted and device-authenticated, which is what makes a
+# header token an acceptable second factor. Get the address with:
+#     tailscale ip -4
+#
+# 🚨 NO --local FLAG NEEDED IF _viewer.json SAYS {"local": true}, which it
+# should on the box that runs the bot: the viewer then reads live/state.json
+# straight off disk and live_sync never starts. Running a sync on the same
+# machine would pull a copy over the top of the file being written.
+
+[Unit]
+Description=Cleanbot flow viewer
+After=cleanbot.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/bot_engine/Cleanbot
+Environment=PYTHONUNBUFFERED=1
+# 🚨 EDIT THE --bind ADDRESS BEFORE INSTALLING. It is a placeholder, not a
+# working value, and systemd will fail to start the unit until you replace it --
+# which is deliberate. This file is committed; the address of a box that runs a
+# funded trading account is not something to publish, so the real one lives only
+# on the box. Get it with:
+#     tailscale ip -4
+#
+# Alternatively, leave the placeholder out entirely and put the address in
+# _viewer.json instead, which is gitignored:
+#     {"local": true, "bind": "100.x.y.z"}
+# serve_viewer already prefers --bind, then _viewer.json's "bind", then
+# 127.0.0.1. Keeping it in _viewer.json means this unit never has to be edited
+# and nothing host-specific can drift into the repo.
+#
+# 🚨 THE VENV, NOT THE SYSTEM PYTHON. /usr/bin/python3 on this
+# box has `requests` and nothing else -- the first boot test died
+# on `No module named 'dotenv'`. The deps live in
+# /root/bot_engine/venv, which is what the old cron line used.
+ExecStart=/root/bot_engine/venv/bin/python serve_viewer.py --local --no-open \
+          --bind TAILSCALE_IP_GOES_HERE --port 8765
+
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cleanbot-viewer
+
+[Install]
+WantedBy=multi-user.target

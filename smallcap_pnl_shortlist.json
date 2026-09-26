@@ -1,0 +1,20 @@
+{
+  "tickers": [
+    "GTLB",
+    "PATH",
+    "URBN",
+    "STRC",
+    "FLY",
+    "KMX",
+    "OKLO",
+    "AVAV",
+    "MP"
+  ],
+  "n": 9,
+  "recipe": {
+    "tr": 1.0,
+    "rr": 1.0,
+    "pct": 80,
+    "min_trades": 15
+  }
+}
