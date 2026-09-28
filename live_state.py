@@ -276,6 +276,10 @@ def _start_vwap(eng):
 # ---------------------------------------------------------------- GEX
 # { ticker: {"heat": [[strike, gamma], ...], "walls": {...}, "ts": epoch} }
 _GEX = {}
+# { ticker: [ {e, k, cg, pg, d, t}, ... ] } every row expiring in the next 7
+# days from the latest pass. Kept OUT of _GEX, which is serialised into
+# state.json every 5s; the weekly page reads it once a morning.
+_GEX_NEAR = {}
 _GEX_THREAD = None
 # 🚨 5 MINUTES, AND THE COST WAS NEVER THE REASON IT WAS 10.
 # Checked against the UW dashboard 2026-09-24: the plan is UNLIMITED daily
@@ -327,8 +331,12 @@ def _fetch_gex(uw, tk, spot):
     """
     import datetime as _d
     today = _d.datetime.now(_NY).date()
-    want = {today.isoformat(), (today + _d.timedelta(days=1)).isoformat()}
-    agg = {}
+    # Page for the next 7 calendar days, not just 0-1DTE: that covers the
+    # next listed expiry across any weekend or holiday, and every remaining
+    # expiry of the week for the weekly page (_weekly_update) -- which is
+    # therefore built from THESE rows at no extra request cost.
+    lo_e, hi_e = today.isoformat(), (today + _d.timedelta(days=7)).isoformat()
+    near = []
     pages, hits, misses, exhausted = 0, 0, 0, True
     for page in range(GEX_PAGES):
         rows = _uw_get(uw, f"/api/stock/{tk}/spot-exposures/expiry-strike",
@@ -338,16 +346,17 @@ def _fetch_gex(uw, tk, spot):
             break
         found_here = 0
         for x in rows:
-            if x.get("expiry") not in want:
+            e = x.get("expiry") or ""
+            if not (lo_e <= e <= hi_e):
                 continue
             found_here += 1
             try:
-                k = float(x["strike"])
-                g = (float(x.get("call_gamma_oi") or 0)
-                     + float(x.get("put_gamma_oi") or 0))
+                near.append(dict(e=e, k=float(x["strike"]),
+                                 cg=float(x.get("call_gamma_oi") or 0),
+                                 pg=float(x.get("put_gamma_oi") or 0),
+                                 d=x.get("date"), t=x.get("time")))
             except (TypeError, ValueError, KeyError):
                 continue
-            agg[k] = agg.get(k, 0.0) + g
         hits += found_here
         misses = 0 if found_here else misses + 1
         if len(rows) < 500:
@@ -356,6 +365,18 @@ def _fetch_gex(uw, tk, spot):
             break                       # we have what we came for
     else:
         exhausted = False               # hit the page cap without breaking
+    # 🚨 0-1DTE = today + the NEXT LISTED expiry, not today + 1 calendar day.
+    # The calendar version asked for Saturday every Friday (and for the
+    # holiday before a long weekend), so the heat silently fell to 0DTE-only
+    # on exactly those days. Fixed 2026-09-27.
+    nxt = min((r["e"] for r in near if r["e"] > lo_e), default=None)
+    want = {lo_e} | ({nxt} if nxt else set())
+    agg = {}
+    for r in near:
+        if r["e"] in want:
+            agg[r["k"]] = agg.get(r["k"], 0.0) + r["cg"] + r["pg"]
+    hits = sum(1 for r in near if r["e"] in want)
+    _GEX_NEAR[tk] = near
     # 🚨 SAY SO when the window never contained the near-dated expiries. An
     # empty heat is not the same as no gamma near spot, and conflating them
     # hid a broken SPY/QQQ heat map for an unknown period.
@@ -443,6 +464,170 @@ def _log_levels(tk, g, spot):
         pass
 
 
+# ---------------------------------------------------------------- WEEKLY GEX
+# The week's 0-4DTE gamma map for weekly_gex.html (operator design, 2026-09-27).
+#
+#   * ONE SNAPSHOT PER TICKER PER MORNING, from the first GEX pass at or after
+#     09:31 ET whose rows carry TODAY's date -- i.e. built on this morning's
+#     open interest and a real opening price. Open interest only changes
+#     overnight, so a snapshot is a map of where the day's levels STARTED;
+#     the heat on the main chart is the intraday one.
+#   * Each snapshot covers every REMAINING expiry of the week (today..Friday,
+#     holidays removed via uw_options_data_lake.trading_days). An expiry's
+#     column therefore freezes at the snapshot of its own expiry morning, and
+#     elapsed days stay drawn until the week ends.
+#   * EVERY snapshot is kept -- Monday's view of Friday, Tuesday's view of
+#     Friday... -- so the page can show how a level migrated. A new ISO week
+#     starts a new file; the old one stays in live/weekly_gex/ as an archive.
+#     Those archives are the only look-ahead-free record of weekly levels:
+#     UW's historical GEX is built on that session's FINAL open interest
+#     (see _log_levels), so it cannot be reconstructed later.
+#   * Costs no extra requests: built from _GEX_NEAR, which _fetch_gex already
+#     paged. The price line is sampled from _PX; a day the bot missed is
+#     backfilled once from ohlc/1m (one request per ticker-day).
+WEEKLY_TICKERS = ("SPY", "QQQ", "IWM")
+WEEKLY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live", "weekly_gex")
+WEEKLY_AT_MOD = 9 * 60 + 31
+WEEKLY_BAND = 0.05          # strikes within +-5% of the snapshot spot
+_WK = {"doc": None}
+_WK_WAIT_SAID = set()       # (ticker, date) we already said "waiting" for
+_WK_BACKFILL_TRIED = set()  # (ticker, date) ohlc/1m backfills attempted
+
+
+def _week_days(d):
+    from uw_options_data_lake import trading_days
+    monday = d - _dt.timedelta(days=d.weekday())
+    return monday, trading_days(monday, monday + _dt.timedelta(days=4))
+
+
+def _wk_doc(monday, days):
+    doc = _WK["doc"]
+    if doc and doc.get("week") == monday.isoformat():
+        return doc
+    path = os.path.join(WEEKLY_DIR, f"{monday.isoformat()}.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        doc = None
+    if not doc or doc.get("week") != monday.isoformat():
+        doc = {"week": monday.isoformat(), "tickers": {}}
+    doc["days"] = [d.isoformat() for d in days]     # holidays can be added late
+    _WK["doc"] = doc
+    return doc
+
+
+def _expiry_heat(rows, spot):
+    """One expiry's rows -> heat [[strike, net, call, put]] within the band,
+    plus levels DERIVED from it (gex-levels is all-expiry, so per-expiry walls
+    have to be computed here and are labelled as such on the page)."""
+    agg = {}
+    for r in rows:
+        a = agg.setdefault(r["k"], [0.0, 0.0])
+        a[0] += r["cg"]
+        a[1] += r["pg"]
+    lo, hi = spot * (1 - WEEKLY_BAND), spot * (1 + WEEKLY_BAND)
+    heat = sorted([k, round(c + p), round(c), round(p)]
+                  for k, (c, p) in agg.items() if lo <= k <= hi and (c or p))
+    if not heat:
+        return None
+    times = sorted(r["t"] for r in rows if r.get("t"))
+    return dict(heat=heat,
+                call_wall=max(heat, key=lambda h: h[2])[0],
+                put_wall=min(heat, key=lambda h: h[3])[0],
+                peak=max(heat, key=lambda h: abs(h[1]))[0],
+                uw_time_max=times[-1] if times else None)
+
+
+def _px_5m_today(tk, today):
+    """Today's 5-minute closes from _PX (last sample in each bucket)."""
+    out = {}
+    for em, px in sorted((_PX.get(tk) or {}).items()):
+        t = _dt.datetime.fromtimestamp(em * 60, _NY)
+        if t.date() != today:
+            continue
+        mod = t.hour * 60 + t.minute
+        if 570 <= mod < 960:
+            out[mod - mod % 5] = round(float(px), 4)
+    return [[m, v] for m, v in sorted(out.items())]
+
+
+def _px_5m_backfill(uw, tk, day):
+    rows = _uw_get(uw, f"/api/stock/{tk}/ohlc/1m", date=day.isoformat()) or []
+    out = {}
+    for x in rows:
+        if x.get("market_time") not in (None, "r"):
+            continue
+        try:
+            t = _dt.datetime.fromisoformat(
+                str(x["start_time"]).replace("Z", "+00:00")).astimezone(_NY)
+            mod = t.hour * 60 + t.minute
+            if t.date() == day and 570 <= mod < 960:
+                out[mod - mod % 5] = round(float(x["close"]), 4)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return [[m, v] for m, v in sorted(out.items())]
+
+
+def _weekly_update(uw, tk, spot):
+    now = _dt.datetime.now(_NY)
+    today = now.date()
+    monday, days = _week_days(today)
+    if today not in days:
+        return
+    doc = _wk_doc(monday, days)
+    t = doc["tickers"].setdefault(tk, {"snapshots": {}, "px": {}})
+    iso = today.isoformat()
+    changed = False
+
+    # ---- the morning snapshot
+    if iso not in t["snapshots"] and now.hour * 60 + now.minute >= WEEKLY_AT_MOD and spot:
+        rows = _GEX_NEAR.get(tk) or []
+        data_dates = sorted({r.get("d") for r in rows if r.get("d")})
+        if rows and data_dates and data_dates[-1] == iso:
+            exp = {}
+            for d in days:
+                if d < today:
+                    continue
+                h = _expiry_heat([r for r in rows if r["e"] == d.isoformat()], spot)
+                if h:
+                    exp[d.isoformat()] = h
+            if exp:
+                t["snapshots"][iso] = dict(
+                    taken_et=now.isoformat(timespec="seconds"), spot=round(spot, 4),
+                    uw_date=data_dates[-1], exp=exp)
+                changed = True
+                print(f"  📅 [WEEKLY GEX] {tk}: snapshot {iso} -- "
+                      f"{len(exp)} expir{'y' if len(exp) == 1 else 'ies'} "
+                      f"({', '.join(sorted(exp))}) at spot {spot:.2f}")
+        elif (tk, iso) not in _WK_WAIT_SAID:
+            _WK_WAIT_SAID.add((tk, iso))
+            print(f"  ⏳ [WEEKLY GEX] {tk}: UW rows are dated "
+                  f"{data_dates[-1] if data_dates else 'nothing'}, not {iso} -- "
+                  f"waiting for today's open interest before snapshotting.")
+
+    # ---- the price line: earlier days backfilled once if the bot missed them
+    for d in days:
+        if d >= today:
+            break
+        k = d.isoformat()
+        if len(t["px"].get(k) or []) < 70 and (tk, k) not in _WK_BACKFILL_TRIED:
+            _WK_BACKFILL_TRIED.add((tk, k))
+            s = _px_5m_backfill(uw, tk, d)
+            if len(s) > len(t["px"].get(k) or []):
+                t["px"][k] = s
+                changed = True
+    s = _px_5m_today(tk, today)
+    if s and s != t["px"].get(iso):
+        t["px"][iso] = s
+        changed = True
+
+    if changed:
+        doc["updated"] = int(time.time())
+        _atomic_write(os.path.join(WEEKLY_DIR, f"{doc['week']}.json"), doc)
+        _atomic_write(os.path.join(WEEKLY_DIR, "latest.json"), doc)
+
+
 def _gex_loop(eng):
     """Daemon. Seven UW calls per ticker per pass, so it runs slowly and
     staggered -- and like the VWAP thread it can never reach the trading loop."""
@@ -459,6 +644,11 @@ def _gex_loop(eng):
                     g = _fetch_gex(eng.uw, tk, spot)
                     if g["heat"] or g["walls"]:
                         _GEX[tk] = g
+                    if tk in WEEKLY_TICKERS:
+                        try:
+                            _weekly_update(eng.uw, tk, spot)
+                        except Exception as e:      # never reach the loop
+                            print(f"  ⚠️ [WEEKLY GEX] {tk}: {type(e).__name__}: {e}")
                     try:
                         cs = _fetch_contract_stats(eng.uw, tk)
                         if cs:

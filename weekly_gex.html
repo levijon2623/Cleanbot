@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Weekly GEX</title>
+<!--
+  The week's 0-4DTE gamma map for SPY / QQQ / IWM. Served beside
+  flow_viewer.html; reads live/weekly_gex/latest.json, which live_state writes
+  (see WEEKLY GEX in live_state.py for how and when snapshots are taken).
+
+  ONE COLUMN PER TRADING DAY, EACH COLUMN IS THAT DAY'S EXPIRY.
+  Every morning at the first GEX pass after 09:31 ET the bot snapshots every
+  remaining expiry of the week. A column shows the latest snapshot taken on or
+  before its own expiry morning, so elapsed days freeze and stay put; the
+  price line walks across them. A new week starts clean. ?week=YYYY-MM-DD
+  opens an archived week.
+
+  "As of" replays the page as it stood on that morning: expiries still ahead
+  use that morning's snapshot, the price line stops at that day's close.
+  Walls and peak are DERIVED per expiry from its own strikes -- UW's
+  gex-levels are all-expiry, so they are not the same numbers as the main
+  chart's dashed walls.
+-->
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3; --dim:#8b949e;
+    --up:#3fb950; --dn:#f85149; --call:#58a6ff; --put:#d29922; --accent:#a371f7;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+    font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  #app{display:flex;flex-direction:column;height:100vh}
+  #bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 12px;
+    border-bottom:1px solid var(--line);background:var(--panel)}
+  #bar h1{font-size:13px;margin:0 8px 0 0;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--dim)}
+  #bar a{color:var(--accent);text-decoration:none}
+  button,select{background:#0d1117;color:var(--fg);border:1px solid var(--line);
+    border-radius:6px;padding:4px 9px;font:inherit;cursor:pointer}
+  button.on{border-color:var(--accent);background:#241b33}
+  #info{margin-left:auto;color:var(--dim);font-size:11px}
+  #legend{display:flex;flex-wrap:wrap;gap:14px;padding:5px 12px;font-size:11px;
+    color:var(--dim);border-bottom:1px solid var(--line)}
+  #legend i{display:inline-block;width:14px;height:8px;margin-right:5px;vertical-align:middle}
+  #wrap{position:relative;flex:1;min-height:0}
+  canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+  #tip{position:absolute;pointer-events:none;background:#0b0f14ee;border:1px solid var(--line);
+    border-radius:6px;padding:6px 8px;font-size:11px;white-space:pre;display:none;z-index:5}
+  #empty{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+    color:var(--dim);text-align:center;padding:16px}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="bar">
+    <h1>Weekly GEX</h1>
+    <span id="tks"></span>
+    <label>view <select id="asof"></select></label>
+    <label>scale <select id="scale">
+      <option value="day">per day</option><option value="week">whole week</option></select></label>
+    <label>zoom <select id="zoom">
+      <option value="0.006">tight</option><option value="0.015" selected>normal</option>
+      <option value="0.03">wide</option></select></label>
+    <a href="flow_viewer.html">← flow viewer</a>
+    <span id="info"></span>
+  </div>
+  <div id="legend">
+    <span><i style="background:#3fb950"></i>net +γ (dealers long gamma)</span>
+    <span><i style="background:#f85149"></i>net −γ</span>
+    <span><i style="background:#58a6ff;height:2px"></i>call wall</span>
+    <span><i style="background:#d29922;height:2px"></i>put wall</span>
+    <span><i style="background:#e6edf3;height:2px"></i>peak |net γ|</span>
+    <span>levels derived per expiry · intensity = |net γ|</span>
+  </div>
+  <div id="wrap"><canvas id="cv"></canvas><div id="tip"></div><div id="empty"></div></div>
+</div>
+<script>
+const $ = s => document.querySelector(s);
+const TICKERS = ['SPY', 'QQQ', 'IWM'];
+const qs = new URLSearchParams(location.search);
+const WEEK = qs.get('week');
+let doc = null, tk = qs.get('t') || localGet('wk_tk') || 'SPY', layout = null;
+
+function localGet(k){ try { return localStorage.getItem(k); } catch(e){ return null; } }
+function localSet(k, v){ try { localStorage.setItem(k, v); } catch(e){} }
+
+const DOW = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+const dlabel = iso => { const d = new Date(iso + 'T12:00:00'); return `${DOW[d.getDay()]} ${iso.slice(5)}`; };
+const fmtG = v => { const a = Math.abs(v);
+  return (v < 0 ? '−' : '') + (a >= 1e9 ? (a/1e9).toFixed(2)+'B' : a >= 1e6 ? (a/1e6).toFixed(1)+'M'
+    : a >= 1e3 ? (a/1e3).toFixed(0)+'K' : a.toFixed(0)); };
+const hhmm = mod => `${String(Math.floor(mod/60)).padStart(2,'0')}:${String(mod%60).padStart(2,'0')}`;
+
+function drawTabs(){
+  $('#tks').innerHTML = TICKERS.map(t =>
+    `<button data-t="${t}" class="${t === tk ? 'on' : ''}">${t}</button>`).join(' ');
+  for (const b of document.querySelectorAll('#tks button'))
+    b.onclick = () => { tk = b.dataset.t; localSet('wk_tk', tk); drawTabs(); fillAsof(); draw(); };
+}
+
+function T(){ return (doc && doc.tickers && doc.tickers[tk]) || {snapshots:{}, px:{}}; }
+
+function fillAsof(){
+  const sel = $('#asof'), keep = sel.value;
+  const snaps = Object.keys(T().snapshots).sort();
+  sel.innerHTML = `<option value="">latest</option>` +
+    snaps.map(s => `<option value="${s}">as of ${dlabel(s)}</option>`).join('');
+  if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
+}
+
+/* For expiry E seen from view date V: the latest snapshot S <= min(E, V)
+   that contains E. Past expiries land on their own morning; future ones on V. */
+function pick(E, V){
+  const snaps = T().snapshots, lim = V && V < E ? V : E;
+  let best = null;
+  for (const s of Object.keys(snaps).sort())
+    if (s <= lim && snaps[s].exp && snaps[s].exp[E]) best = s;
+  return best ? {snap: best, taken: snaps[best].taken_et, spot: snaps[best].spot,
+                 ...snaps[best].exp[E]} : null;
+}
+
+function draw(){
+  const cv = $('#cv'), wrap = $('#wrap'), dpr = window.devicePixelRatio || 1;
+  const W = wrap.clientWidth, H = wrap.clientHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.fillStyle = '#0d1117'; g.fillRect(0, 0, W, H);
+  const empty = $('#empty');
+  if (!doc){ empty.style.display = 'flex';
+    empty.textContent = 'no weekly snapshot yet — the bot writes live/weekly_gex/latest.json at the first GEX pass after 09:31 ET on a trading day.';
+    return; }
+  const days = doc.days || [], V = $('#asof').value || null, t = T();
+  const cols = days.map(E => pick(E, V));
+  const px = {};
+  for (const d of days) if (!V || d <= V) px[d] = t.px[d] || [];
+  if (!cols.some(Boolean) && !Object.values(px).some(a => a.length)){
+    empty.style.display = 'flex'; empty.textContent = `no ${tk} data for the week of ${doc.week} yet.`; return; }
+  empty.style.display = 'none';
+
+  // ---- y range: the week's prices and snapshot spots, padded by the zoom
+  const pts = [];
+  for (const a of Object.values(px)) for (const [, v] of a) pts.push(v);
+  for (const c of cols) if (c) pts.push(c.spot);
+  const pad = parseFloat($('#zoom').value);
+  const lo = Math.min(...pts) * (1 - pad), hi = Math.max(...pts) * (1 + pad);
+  const AX = 64, TOP = 34, BOT = 8, pw = W - AX, ph = H - TOP - BOT;
+  const y = p => TOP + (hi - p) / (hi - lo) * ph;
+  const cw = pw / Math.max(days.length, 1);
+  const x = (i, mod) => i * cw + (mod - 570) / 390 * cw;
+  layout = {days, cols, cw, TOP, ph, lo, hi, AX, pw, y, V};
+
+  // ---- heat
+  const weekMax = Math.max(1, ...cols.filter(Boolean).flatMap(c => c.heat.map(h => Math.abs(h[1]))));
+  const today = new Date().toLocaleDateString('en-CA', {timeZone: 'America/New_York'});
+  cols.forEach((c, i) => {
+    if (!c) return;
+    const mx = $('#scale').value === 'week' ? weekMax : Math.max(1, ...c.heat.map(h => Math.abs(h[1])));
+    const ks = c.heat.map(h => h[0]);
+    const steps = ks.slice(1).map((k, j) => k - ks[j]).filter(s => s > 0).sort((a, b) => a - b);
+    const step = steps.length ? steps[Math.floor(steps.length / 2)] : 1;
+    const bh = Math.max(1, Math.abs(y(0) - y(step)) * 0.92);
+    for (const [k, net] of c.heat){
+      if (k < lo || k > hi) continue;
+      const a = Math.min(1, Math.abs(net) / mx);
+      if (a < 0.02) continue;
+      g.fillStyle = net >= 0 ? `rgba(63,185,80,${(0.08 + 0.85*a).toFixed(3)})`
+                             : `rgba(248,81,73,${(0.08 + 0.85*a).toFixed(3)})`;
+      g.fillRect(i * cw + 1, y(k) - bh / 2, cw - 2, bh);
+    }
+    for (const [key, col, dash] of [['call_wall','#58a6ff',[5,4]], ['put_wall','#d29922',[5,4]], ['peak','#e6edf3',[2,3]]]){
+      const k = c[key]; if (k == null || k < lo || k > hi) continue;
+      g.strokeStyle = col; g.lineWidth = 1.5; g.setLineDash(dash);
+      g.beginPath(); g.moveTo(i * cw + 2, y(k)); g.lineTo((i + 1) * cw - 2, y(k)); g.stroke();
+      g.setLineDash([]); g.fillStyle = col; g.font = '10px ui-monospace,monospace';
+      g.fillText(String(k), i * cw + 4, y(k) - 3);
+    }
+  });
+
+  // ---- grid: day separators, headers, price axis
+  g.strokeStyle = '#30363d'; g.lineWidth = 1;
+  days.forEach((d, i) => {
+    g.beginPath(); g.moveTo(i * cw + .5, TOP - 30); g.lineTo(i * cw + .5, H - BOT); g.stroke();
+    const n = days.filter(e => e >= today && e < d).length;
+    const narrow = cw < 150;                     // phone: compact headers
+    const tag = d < today ? (narrow ? 'exp' : 'expired') : `${d === today ? 0 : n}${narrow ? 'D' : 'DTE'}`;
+    g.fillStyle = d === today ? '#a371f7' : '#8b949e'; g.font = '11px ui-monospace,monospace';
+    g.fillText(narrow ? `${dlabel(d).slice(0, 3)} ${tag}` : `${dlabel(d)} · ${tag}`, i * cw + 4, 14);
+    const c = cols[i]; g.fillStyle = '#6e7681'; g.font = '10px ui-monospace,monospace';
+    g.fillText(c ? (narrow ? `${c.snap.slice(5)} ${c.taken.slice(11, 16)}`.slice(0, Math.floor(cw / 6.2))
+                           : `snap ${dlabel(c.snap)} ${c.taken.slice(11, 16)}`)
+                 : (narrow ? '—' : 'no snapshot'), i * cw + 4, 27);
+  });
+  if (days.includes(today) && !V){
+    const i = days.indexOf(today); g.strokeStyle = '#a371f7'; g.lineWidth = 1.5;
+    g.strokeRect(i * cw + 1, TOP - 30, cw - 2, H - BOT - TOP + 30);
+  }
+  g.fillStyle = '#8b949e'; g.font = '11px ui-monospace,monospace';
+  // round price steps (0.25 / 0.5 / 1 / 2 / 5 ...), about one per 60px
+  const raw = (hi - lo) / Math.max(4, Math.floor(ph / 60));
+  const st = [0.1, 0.25, 0.5, 1, 2, 2.5, 5, 10, 20, 25, 50].find(s => s >= raw) || 100;
+  for (let p = Math.ceil(lo / st) * st; p <= hi; p += st){
+    g.fillText(p.toFixed(st < 1 ? 2 : 0), pw + 6, y(p) + 4);
+    g.strokeStyle = '#1c2128'; g.beginPath(); g.moveTo(0, y(p)); g.lineTo(pw, y(p)); g.stroke();
+  }
+
+  // ---- price line
+  g.strokeStyle = '#e6edf3'; g.lineWidth = 1.6; g.beginPath();
+  let started = false;
+  days.forEach((d, i) => {
+    for (const [mod, v] of (px[d] || [])){
+      const X = x(i, mod), Y = y(v);
+      if (!started){ g.moveTo(X, Y); started = true; } else g.lineTo(X, Y);
+    }
+  });
+  g.stroke();
+  const lastDay = [...days].reverse().find(d => (px[d] || []).length);
+  if (lastDay){
+    const a = px[lastDay], [mod, v] = a[a.length - 1], i = days.indexOf(lastDay);
+    g.fillStyle = '#a371f7'; g.beginPath(); g.arc(x(i, mod), y(v), 3.5, 0, 7); g.fill();
+    g.fillRect(pw, y(v) - 8, AX, 16); g.fillStyle = '#0d1117'; g.fillText(v.toFixed(2), pw + 6, y(v) + 4);
+  }
+}
+
+$('#wrap').addEventListener('mousemove', ev => {
+  const tip = $('#tip'); if (!layout){ tip.style.display = 'none'; return; }
+  const r = ev.currentTarget.getBoundingClientRect(), mx = ev.clientX - r.left, my = ev.clientY - r.top;
+  const {days, cols, cw, TOP, ph, lo, hi, pw} = layout;
+  const i = Math.floor(mx / cw);
+  if (mx > pw || i < 0 || i >= days.length || my < TOP){ tip.style.display = 'none'; return; }
+  const p = hi - (my - TOP) / ph * (hi - lo);
+  const c = cols[i], mod = 570 + Math.round((mx - i * cw) / cw * 390);
+  const pxs = (T().px[days[i]] || []).filter(([m]) => m <= mod), last = pxs[pxs.length - 1];
+  let s = `${dlabel(days[i])} expiry\nprice ${p.toFixed(2)}`;
+  if (last) s += `   ${hhmm(last[0])} close ${last[1].toFixed(2)}`;
+  if (c){
+    const h = c.heat.reduce((b, h) => Math.abs(h[0] - p) < Math.abs(b[0] - p) ? h : b, c.heat[0]);
+    s += `\nstrike ${h[0]}  net ${fmtG(h[1])}\n  call ${fmtG(h[2])}  put ${fmtG(h[3])}` +
+         `\nsnapshot ${dlabel(c.snap)} ${c.taken.slice(11, 16)} ET, spot ${c.spot}` +
+         `\nwalls: call ${c.call_wall}  put ${c.put_wall}  peak ${c.peak}`;
+  } else s += '\nno snapshot for this expiry';
+  tip.textContent = s; tip.style.display = 'block';
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  tip.style.left = Math.min(mx + 14, r.width - tw - 4) + 'px';
+  tip.style.top = Math.min(my + 14, r.height - th - 4) + 'px';
+});
+$('#wrap').addEventListener('mouseleave', () => $('#tip').style.display = 'none');
+for (const id of ['#asof', '#scale', '#zoom']) $(id).addEventListener('change', draw);
+window.addEventListener('resize', draw);
+
+async function load(){
+  const path = WEEK ? `live/weekly_gex/${WEEK}.json` : 'live/weekly_gex/latest.json';
+  try {
+    const r = await fetch(path + '?t=' + Date.now());
+    if (r.ok){ doc = await r.json();
+      $('#info').textContent = `week of ${doc.week}` + (doc.updated
+        ? ` · updated ${new Date(doc.updated * 1000).toLocaleTimeString('en-US', {timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit'})} ET` : '');
+    } else { doc = null; $('#info').textContent = `${path}: ${r.status}`; }
+  } catch(e){ doc = null; $('#info').textContent = 'fetch failed'; }
+  fillAsof(); draw();
+}
+drawTabs(); load();
+if (!WEEK) setInterval(load, 60000);
+</script>
+</body>
+</html>
