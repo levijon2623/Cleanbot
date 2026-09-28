@@ -170,7 +170,19 @@ EOD_FLATTEN_MOD = 15 * 60 + 55  # 15:55 ET
 # ---- exits ---------------------------------------------------------------
 EXIT_MARKETABLE = "marketable"
 EXIT_911 = "911"
-EXIT_CHASE_S = 20.0            # unfilled this long -> cancel and escalate
+# unfilled this long -> cancel and escalate. Was 20s; on 2026-09-28 a 0DTE
+# bid ran away from a marketable close in well under that, so 10s.
+EXIT_CHASE_S = 10.0
+# 🚨 A REPLACE IS CANCEL -> CONFIRMED -> PLACE, NEVER CANCEL + PLACE. Until the
+# broker confirms the cancel, the contract is still committed to the old SELL,
+# and a second SELL for the same quantity is refused as "in excess of current
+# holding quantity" (OPENAPI_OPTION_LONG_POSITION_MUST_BE_CLOSE_THAN_SELL_SHORT).
+# That is exactly what happened 2026-09-28 13:20:23: the escalation was
+# rejected, the rejection was logged as "sent", and a live IWM 0DTE sat with
+# NO working exit for four minutes until it was closed from the phone.
+EXIT_REPLACE_WAIT_S = 6.0      # cancel unconfirmed this long -> send it again
+EXIT_RETRY_S = 1.0             # a rejected exit is re-sent after this
+EXIT_RETRY_MAX = 5             # sends in total, then it is on you
 # An unfilled ENTRY is not chased. An exit must happen at almost any price; an
 # entry is optional, and a marketable limit that has not filled in 20s means
 # the book moved away -- the setup you pressed the button on is gone. Chasing
@@ -868,10 +880,25 @@ def flatten(eng, tk, reason="MANUAL EOD", mode=EXIT_MARKETABLE):
                       f"— POSITION STILL OPEN")
         return False
     coid = (res or {}).get("client_order_id")
-    if not coid:
-        _event(False, f"{tk} exit NOT ACCEPTED by the broker — POSITION STILL "
-                      f"OPEN ({res})")
+    if not coid or (res or {}).get("accepted") is False:
+        # 🚨 NOT SENT. A coid comes back even for a rejected order (it is
+        # minted locally), so `accepted` is the test. Schedule a retry --
+        # _check_exits re-sends it -- rather than tracking a ghost.
+        why = (res or {}).get("error") or "rejected"
+        n = int((pos.get("exit_retry") or {}).get("n") or 0) + 1   # sends so far
+        if n < EXIT_RETRY_MAX:
+            pos["exit_retry"] = dict(mode=mode, reason=reason, n=n, at=time.time())
+            save_positions(eng)
+            _event(False, f"{tk} exit NOT ACCEPTED ({why[:120]}) — attempt "
+                          f"{n}/{EXIT_RETRY_MAX}, retrying in {EXIT_RETRY_S:.0f}s, "
+                          f"POSITION STILL OPEN")
+        else:
+            pos.pop("exit_retry", None)
+            save_positions(eng)
+            _event(False, f"{tk} exit rejected {EXIT_RETRY_MAX}x ({why[:120]}) — "
+                          f"POSITION STILL OPEN, CLOSE IT IN THE BROKER APP")
         return False
+    pos.pop("exit_retry", None)
     pos.update(exit_coid=coid, exit_at=time.time(), exit_px=px,
                exit_mode=mode, exit_reason=reason)
     save_positions(eng)
@@ -1016,10 +1043,15 @@ def _check_exits(eng):
     follow-up machinery, so it has to do the three things _manage_exit_order
     does for the bot: confirm, re-arm on a cancel, and escalate on a stall.
     """
-    from config import DRY_RUN
     for tk, pos in list((getattr(eng, "manual_holds", None) or {}).items()):
         coid = pos.get("exit_coid")
-        if not coid or not _poll_due(pos, "last_exit_poll"):
+        if not coid:
+            # a rejected exit waiting to be re-sent (see flatten)
+            r = pos.get("exit_retry")
+            if r and time.time() - float(r.get("at") or 0) >= EXIT_RETRY_S:
+                flatten(eng, tk, r.get("reason") or "EXIT", r.get("mode") or EXIT_911)
+            continue
+        if not _poll_due(pos, "last_exit_poll"):
             continue
         st, fq, fpx, readable = _status(eng, coid)
         if not readable:
@@ -1039,10 +1071,27 @@ def _check_exits(eng):
                     load_positions(eng).pop(tk, None)
                     save_positions(eng)
                     continue
-                if pos["blind"] == BLIND_BEFORE_VERIFY:
+                if pos["blind"] == BLIND_BEFORE_VERIFY and gone is False:
+                    # 🚨 STILL HELD, EXIT UNREADABLE -> ASSUME NO EXIT IS
+                    # WORKING AND SEND ONE. This used to warn once and poll
+                    # the same unreadable coid forever (2026-09-28: 4 minutes
+                    # of "Order not present" on an order that was never
+                    # accepted). Re-sending is safe: if the old SELL does
+                    # exist, the broker refuses a second one for the same
+                    # quantity, and the retry cap turns that into an alert.
                     _event(False, f"{tk} exit status unreadable "
                                   f"{pos['blind']}x and the position still "
-                                  f"shows — state UNKNOWN, CHECK THE BROKER")
+                                  f"shows — re-sending the close at 911")
+                    pos.pop("exit_coid", None)
+                    pos.pop("blind", None)
+                    pos.pop("replacing", None)
+                    save_positions(eng)
+                    flatten(eng, tk, f"{pos.get('exit_reason', 'EXIT')} RESENT", EXIT_911)
+                    continue
+                if pos["blind"] == BLIND_BEFORE_VERIFY:
+                    _event(False, f"{tk} exit status unreadable "
+                                  f"{pos['blind']}x and the position could "
+                                  f"not be checked — state UNKNOWN, CHECK THE BROKER")
             save_positions(eng)
             continue
         pos.pop("blind", None)
@@ -1068,11 +1117,32 @@ def _check_exits(eng):
             load_positions(eng).pop(tk, None)
             save_positions(eng)
             continue
+        if st in ("CANCELLED", "FAILED") and pos.get("replacing"):
+            # our own escalation cancel is CONFIRMED -- only now is the
+            # contract free to sell again (see EXIT_REPLACE_WAIT_S)
+            mode = pos.pop("replacing")
+            pos.pop("exit_coid", None)
+            pos.pop("cancel_at", None)
+            save_positions(eng)
+            flatten(eng, tk, f"{pos.get('exit_reason', 'EXIT')} ESCALATED", mode)
+            continue
         if st in ("CANCELLED", "FAILED"):
             # re-arm: the next flatten() call (EOD sweep or a button) re-sends
             pos.pop("exit_coid", None)
             save_positions(eng)
             _event(False, f"{tk} exit {st} — hold RESTORED, still open")
+            continue
+        if pos.get("replacing"):
+            # cancel sent, not yet confirmed: never place over it. Nudge the
+            # cancel again if the broker is slow to acknowledge it.
+            if time.time() - float(pos.get("cancel_at") or 0) > EXIT_REPLACE_WAIT_S:
+                try:
+                    eng.webull.cancel_option_order(coid)
+                except Exception as e:              # noqa: BLE001
+                    print(f"  ⚠️ re-cancel exit {tk}: {type(e).__name__}: {e}")
+                pos["cancel_at"] = time.time()
+                save_positions(eng)
+                _event(False, f"{tk} exit cancel not yet confirmed — cancel re-sent")
             continue
         if time.time() - float(pos.get("exit_at") or 0) > EXIT_CHASE_S:
             if pos.get("exit_mode") == EXIT_911:
@@ -1097,14 +1167,21 @@ def _check_exits(eng):
                 pos["exit_at"] = time.time()    # re-warn, do not spam
                 save_positions(eng)
                 continue
-            if not DRY_RUN:
+            # 🚨 CANCEL REGARDLESS OF DRY_RUN. This used to be `if not DRY_RUN`,
+            # so for a REAL hold under a paper bot the stalled order was never
+            # cancelled here -- only by flatten's cancel_resting a moment
+            # before the new SELL, which is the race described above. A real
+            # position's exit is real (see flatten). Then WAIT: the 911 order
+            # goes out from the CANCELLED branch once the cancel is confirmed.
+            try:
                 eng.webull.cancel_option_order(coid)
-            pos.pop("exit_coid", None)
+            except Exception as e:                  # noqa: BLE001
+                print(f"  ⚠️ cancel exit {tk}: {type(e).__name__}: {e}")
+            pos["replacing"] = EXIT_911
+            pos["cancel_at"] = time.time()
             save_positions(eng)
-            _event(False, f"{tk} exit stalled {EXIT_CHASE_S:.0f}s — cancelled, "
-                          f"escalating to 911 pricing")
-            flatten(eng, tk, f"{pos.get('exit_reason','EXIT')} ESCALATED",
-                    EXIT_911)
+            _event(False, f"{tk} exit stalled {EXIT_CHASE_S:.0f}s — cancelling; "
+                          f"911 re-price goes out once the cancel is confirmed")
 
 
 def panic(eng, reason="911"):

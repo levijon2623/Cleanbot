@@ -972,19 +972,28 @@ class WebullGammaClient:
             order["stop_price"] = str(round(max(0.01, stop_price or 0.01), 2))
 
         data = None
+        err = None
         try:
             resp = self.trade_client.order_v3.place_order(self.account_id, new_orders=[order])
             data = resp.json() if hasattr(resp, "json") else resp
         except Exception as e:
             print(f"  ⚠️ order_v3.place_order failed ({e}); falling back to legacy route...")
+            err = str(e)
             try:
                 data = self._route_v2_order({"account_id": self.account_id, "new_orders": [order]})
+                err = None
             except Exception as e2:
                 print(f"  🚨 legacy route also failed: {e2}")
+                err = str(e2)
 
         order_id, accepted = self._parse_place_response(data)
         print(f"  └─ accepted={accepted} coid={coid} order_id={order_id}")
-        return {"accepted": accepted, "client_order_id": coid, "order_id": order_id, "raw": data}
+        # 🚨 A coid IS RETURNED EVEN WHEN THE ORDER WAS REJECTED -- it is minted
+        # locally above. Callers must check `accepted`; `error` carries the
+        # broker's reason. Treating "has a coid" as "sent" left a manual IWM
+        # close tracking an order that never existed, 2026-09-28 13:20.
+        return {"accepted": accepted, "client_order_id": coid, "order_id": order_id,
+                "raw": data, "error": err}
 
     @staticmethod
     def _parse_place_response(data):

@@ -1105,6 +1105,23 @@ class FlowExecutionEngine:
                 self.allocator.release_trade(snipe.get("capital_committed", 0.0))
             del self.active_snipes[ticker]
             return
+        # 🚨 RE-PRICE = CANCEL -> CONFIRMED -> PLACE. This used to cancel and
+        # place in the same breath. Until the broker confirms the cancel, the
+        # contract is still committed to the old SELL and a new one is refused
+        # ("in excess of current holding quantity") -- the manual close hit
+        # exactly that on 2026-09-28 (manual_orders.EXIT_REPLACE_WAIT_S).
+        # The replacement now goes out only once the old order reads CANCELLED.
+        if snipe.get("replace_pending"):
+            if st in ("CANCELLED", "FAILED"):
+                if time.time() - snipe.get("replace_try_at", 0) < 1.0:
+                    return
+                snipe["replace_try_at"] = time.time()
+                self._place_exit_retry(ticker, snipe)
+            elif time.time() - snipe.get("cancel_at", 0) > 6:
+                self.webull.cancel_option_order(snipe["exit_coid"])
+                snipe["cancel_at"] = time.time()
+            return
+
         if st in ("CANCELLED", "FAILED"):
             print(f"  ↩️ {ticker} exit order {st}; re-arming brackets.")
             snipe["exiting"] = False
@@ -1118,6 +1135,14 @@ class FlowExecutionEngine:
         if bid == 0.0 and retries < 3:
             return  # no quote to re-price against yet
         self.webull.cancel_option_order(snipe["exit_coid"])
+        snipe.update(replace_pending=True, cancel_at=time.time(), replace_try_at=0)
+
+    def _place_exit_retry(self, ticker, snipe):
+        """Send the re-priced exit once the old one is confirmed cancelled.
+        Rejections are retried (>= 1s apart, 5 tries), then the position goes
+        back to the bracket loop, which will fire a fresh exit."""
+        retries = snipe.get("exit_retries", 0)
+        bid, ask = self.webull.get_live_option_quote(snipe['option_id'])
         spread = max(0.0, ask - bid)
         if retries >= 3:
             px = 0.01
@@ -1131,8 +1156,21 @@ class FlowExecutionEngine:
             is_closing=True, order_type="LIMIT", limit_price=px,
         )
         coid = res.get("client_order_id")
-        if coid:
+        if coid and res.get("accepted") is not False:
+            snipe.pop("replace_pending", None)
+            snipe.pop("replace_rejects", None)
             snipe.update(exit_coid=coid, exit_placed_at=time.time(), exit_retries=retries + 1)
+            return
+        # rejected: a coid is minted locally, so `accepted` is the test
+        n = snipe.get("replace_rejects", 0) + 1
+        snipe["replace_rejects"] = n
+        print(f"  ⚠️ {ticker} re-priced exit REJECTED ({n}/5): {res.get('error') or 'rejected'}")
+        if n >= 5:
+            print(f"  🚨 {ticker} exit rejected 5x — back to the bracket loop; "
+                  f"CHECK THE BROKER")
+            snipe.pop("replace_pending", None)
+            snipe.pop("replace_rejects", None)
+            snipe["exiting"] = False
 
     def _reconcile_startup(self, tickers):
         """Get flat & clean before trading: cancel stale watchlist option orders and
