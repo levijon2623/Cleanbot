@@ -41,12 +41,12 @@ _HOLIDAYS = {}
 
 
 def _is_holiday(d) -> bool:
-    """NYSE full-day closures, from the lake tool's calendar. If that import
+    """NYSE full-day closures, from market_calendar. If that import
     fails the gate degrades to weekdays-only -- loudly, once -- which costs one
     wasted session of requests a few times a year, not a missed trading day."""
     if d.year not in _HOLIDAYS:
         try:
-            from uw_options_data_lake import market_holidays
+            from market_calendar import market_holidays
             _HOLIDAYS[d.year] = set(market_holidays(d.year))
         except Exception as e:
             print(f"⚠️ [UW] holiday calendar unavailable ({e}); gating on weekdays only")

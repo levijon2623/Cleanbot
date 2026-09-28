@@ -45,6 +45,7 @@ import datetime as _dt
 import json
 import os
 import tempfile
+import threading
 import time
 from zoneinfo import ZoneInfo
 
@@ -224,6 +225,11 @@ def _vwap_loop(eng):
                             _VOLBASE[tk] = base
                     tod = [b for b in bars
                            if str(b.get("minute_et", ""))[:10] == today]
+                    if tk in WEEKLY_TICKERS:
+                        try:
+                            _weekly_session(tk, tod)
+                        except Exception as e:      # never reach the loop
+                            print(f"  ⚠️ [WEEKLY OHLC] {tk}: {type(e).__name__}: {e}")
                     s = _vwap_from_bars(tod)
                     if s:
                         _VW[tk] = s
@@ -473,7 +479,7 @@ def _log_levels(tk, g, spot):
 #     overnight, so a snapshot is a map of where the day's levels STARTED;
 #     the heat on the main chart is the intraday one.
 #   * Each snapshot covers every REMAINING expiry of the week (today..Friday,
-#     holidays removed via uw_options_data_lake.trading_days). An expiry's
+#     holidays removed via market_calendar.trading_days). An expiry's
 #     column therefore freezes at the snapshot of its own expiry morning, and
 #     elapsed days stay drawn until the week ends.
 #   * EVERY snapshot is kept -- Monday's view of Friday, Tuesday's view of
@@ -483,19 +489,35 @@ def _log_levels(tk, g, spot):
 #     UW's historical GEX is built on that session's FINAL open interest
 #     (see _log_levels), so it cannot be reconstructed later.
 #   * Costs no extra requests: built from _GEX_NEAR, which _fetch_gex already
-#     paged. The price line is sampled from _PX; a day the bot missed is
-#     backfilled once from ohlc/1m (one request per ticker-day).
+#     paged. The price line is sampled from _PX.
+#   * SESSION OHLC per day (RTH open / high / low / close, drawn in each
+#     elapsed day's column) comes from the 1m bars the VWAP thread already
+#     fetches every 2 minutes (_weekly_session) -- true highs and lows, not
+#     5-minute closes. A day is marked FINAL by a pass at or after 16:02 ET;
+#     the VWAP thread polls until 16:05, so that normally happens the same
+#     afternoon. BACKSTOP: a day left unfinal (bot down at the close) is
+#     fetched once from ohlc/1m by the next trading day's pass -- and for the
+#     week's LAST day, which has no next day in its own week, by the first
+#     pass of the following week, written into the archived file. One
+#     request per ticker-day, only when needed. Half days need no special
+#     case: a fetch after the day ends returns the whole shortened session.
 WEEKLY_TICKERS = ("SPY", "QQQ", "IWM")
 WEEKLY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live", "weekly_gex")
 WEEKLY_AT_MOD = 9 * 60 + 31
+WEEKLY_FINAL_MOD = 16 * 60 + 2
 WEEKLY_BAND = 0.05          # strikes within +-5% of the snapshot spot
 _WK = {"doc": None}
+# The GEX thread (snapshots) and the VWAP thread (session OHLC) both write the
+# week file; one lock around every read-modify-write keeps them from
+# overwriting each other's update.
+_WK_LOCK = threading.Lock()
 _WK_WAIT_SAID = set()       # (ticker, date) we already said "waiting" for
 _WK_BACKFILL_TRIED = set()  # (ticker, date) ohlc/1m backfills attempted
+_WK_PREV_DONE = set()       # (ticker, monday) previous-week finalisations run
 
 
 def _week_days(d):
-    from uw_options_data_lake import trading_days
+    from market_calendar import trading_days
     monday = d - _dt.timedelta(days=d.weekday())
     return monday, trading_days(monday, monday + _dt.timedelta(days=4))
 
@@ -552,7 +574,21 @@ def _px_5m_today(tk, today):
     return [[m, v] for m, v in sorted(out.items())]
 
 
-def _px_5m_backfill(uw, tk, day):
+def _ohlc_of(bars):
+    """[(mod, o, h, l, c), ...] ascending -> {o, h, l, c} of the RTH session."""
+    return dict(o=round(bars[0][1], 4), h=round(max(b[2] for b in bars), 4),
+                l=round(min(b[3] for b in bars), 4), c=round(bars[-1][4], 4))
+
+
+def _px_5m_of(bars):
+    out = {}
+    for mod, _o, _h, _l, c in bars:
+        out[mod - mod % 5] = round(c, 4)
+    return [[m, v] for m, v in sorted(out.items())]
+
+
+def _day_bars_1m(uw, tk, day):
+    """One completed day's RTH 1m bars from ohlc/1m: [(mod, o, h, l, c)]."""
     rows = _uw_get(uw, f"/api/stock/{tk}/ohlc/1m", date=day.isoformat()) or []
     out = {}
     for x in rows:
@@ -563,13 +599,74 @@ def _px_5m_backfill(uw, tk, day):
                 str(x["start_time"]).replace("Z", "+00:00")).astimezone(_NY)
             mod = t.hour * 60 + t.minute
             if t.date() == day and 570 <= mod < 960:
-                out[mod - mod % 5] = round(float(x["close"]), 4)
+                out[mod] = (mod, float(x["open"]), float(x["high"]),
+                            float(x["low"]), float(x["close"]))
         except (KeyError, TypeError, ValueError):
             continue
-    return [[m, v] for m, v in sorted(out.items())]
+    return [out[m] for m in sorted(out)]
+
+
+def _wk_write(doc, latest=True):
+    doc["updated"] = int(time.time())
+    _atomic_write(os.path.join(WEEKLY_DIR, f"{doc['week']}.json"), doc)
+    if latest:
+        _atomic_write(os.path.join(WEEKLY_DIR, "latest.json"), doc)
+
+
+def _finalise_day(uw, t, tk, d):
+    """Backstop: fetch a completed day once; set its final OHLC and, if the
+    stored price line is short, its 5-minute closes. True if anything changed."""
+    k = d.isoformat()
+    have_final = (t.get("ohlc") or {}).get(k, {}).get("final")
+    short_px = len(t["px"].get(k) or []) < 70
+    if (have_final and not short_px) or (tk, k) in _WK_BACKFILL_TRIED:
+        return False
+    _WK_BACKFILL_TRIED.add((tk, k))
+    bars = _day_bars_1m(uw, tk, d)
+    if not bars:
+        return False
+    t.setdefault("ohlc", {})[k] = dict(_ohlc_of(bars), final=True)
+    px = _px_5m_of(bars)
+    if len(px) > len(t["px"].get(k) or []):
+        t["px"][k] = px
+    return True
+
+
+def _weekly_session(tk, tod):
+    """Today's running RTH OHLC from the VWAP thread's 1m bars (no request).
+    FINAL once written by a pass at or after WEEKLY_FINAL_MOD."""
+    now = _dt.datetime.now(_NY)
+    today = now.date()
+    bars = []
+    for b in tod:
+        try:
+            mod = int(b["mod"])
+            if 570 <= mod < 960:
+                bars.append((mod, float(b["o"]), float(b["h"]), float(b["l"]), float(b["c"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not bars:
+        return
+    bars.sort()
+    with _WK_LOCK:
+        monday, days = _week_days(today)
+        if today not in days:
+            return
+        doc = _wk_doc(monday, days)
+        t = doc["tickers"].setdefault(tk, {"snapshots": {}, "px": {}})
+        new = dict(_ohlc_of(bars), final=now.hour * 60 + now.minute >= WEEKLY_FINAL_MOD)
+        oh = t.setdefault("ohlc", {})
+        if oh.get(today.isoformat()) != new and not (oh.get(today.isoformat()) or {}).get("final"):
+            oh[today.isoformat()] = new
+            _wk_write(doc)
 
 
 def _weekly_update(uw, tk, spot):
+    with _WK_LOCK:
+        _weekly_update_locked(uw, tk, spot)
+
+
+def _weekly_update_locked(uw, tk, spot):
     now = _dt.datetime.now(_NY)
     today = now.date()
     monday, days = _week_days(today)
@@ -579,6 +676,24 @@ def _weekly_update(uw, tk, spot):
     t = doc["tickers"].setdefault(tk, {"snapshots": {}, "px": {}})
     iso = today.isoformat()
     changed = False
+
+    # ---- the previous week's last day(s): finalise into its archive, once
+    prev = monday - _dt.timedelta(days=7)
+    if (tk, prev) not in _WK_PREV_DONE:
+        _WK_PREV_DONE.add((tk, prev))
+        path = os.path.join(WEEKLY_DIR, f"{prev.isoformat()}.json")
+        try:
+            with open(path, encoding="utf-8") as f:
+                pdoc = json.load(f)
+        except (OSError, ValueError):
+            pdoc = None
+        pt = (pdoc or {}).get("tickers", {}).get(tk)
+        if pt:
+            done = False
+            for k in pdoc.get("days", []):
+                done |= _finalise_day(uw, pt, tk, _dt.date.fromisoformat(k))
+            if done:
+                _wk_write(pdoc, latest=False)
 
     # ---- the morning snapshot
     if iso not in t["snapshots"] and now.hour * 60 + now.minute >= WEEKLY_AT_MOD and spot:
@@ -606,26 +721,18 @@ def _weekly_update(uw, tk, spot):
                   f"{data_dates[-1] if data_dates else 'nothing'}, not {iso} -- "
                   f"waiting for today's open interest before snapshotting.")
 
-    # ---- the price line: earlier days backfilled once if the bot missed them
+    # ---- earlier days this week: final OHLC + full price line (backstop)
     for d in days:
         if d >= today:
             break
-        k = d.isoformat()
-        if len(t["px"].get(k) or []) < 70 and (tk, k) not in _WK_BACKFILL_TRIED:
-            _WK_BACKFILL_TRIED.add((tk, k))
-            s = _px_5m_backfill(uw, tk, d)
-            if len(s) > len(t["px"].get(k) or []):
-                t["px"][k] = s
-                changed = True
+        changed |= _finalise_day(uw, t, tk, d)
     s = _px_5m_today(tk, today)
     if s and s != t["px"].get(iso):
         t["px"][iso] = s
         changed = True
 
     if changed:
-        doc["updated"] = int(time.time())
-        _atomic_write(os.path.join(WEEKLY_DIR, f"{doc['week']}.json"), doc)
-        _atomic_write(os.path.join(WEEKLY_DIR, "latest.json"), doc)
+        _wk_write(doc)
 
 
 def _gex_loop(eng):

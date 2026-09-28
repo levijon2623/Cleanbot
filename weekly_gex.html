@@ -71,6 +71,8 @@
     <span><i style="background:#58a6ff;height:2px"></i>call wall</span>
     <span><i style="background:#d29922;height:2px"></i>put wall</span>
     <span><i style="background:#e6edf3;height:2px"></i>peak |net γ|</span>
+    <span><i style="background:#39c5cf;height:2px"></i>session high / low</span>
+    <span><i style="background:#a371f7;height:2px"></i>open (dashed) / close</span>
     <span>levels derived per expiry · intensity = |net γ|</span>
   </div>
   <div id="wrap"><canvas id="cv"></canvas><div id="tip"></div><div id="empty"></div></div>
@@ -142,6 +144,8 @@ function draw(){
   const pts = [];
   for (const a of Object.values(px)) for (const [, v] of a) pts.push(v);
   for (const c of cols) if (c) pts.push(c.spot);
+  for (const d of days){ const o = (t.ohlc || {})[d];     // true extremes, not 5m closes
+    if (o && (!V || d < V)) pts.push(o.h, o.l); }
   const pad = parseFloat($('#zoom').value);
   const lo = Math.min(...pts) * (1 - pad), hi = Math.max(...pts) * (1 + pad);
   const AX = 64, TOP = 34, BOT = 8, pw = W - AX, ph = H - TOP - BOT;
@@ -174,6 +178,26 @@ function draw(){
       g.beginPath(); g.moveTo(i * cw + 2, y(k)); g.lineTo((i + 1) * cw - 2, y(k)); g.stroke();
       g.setLineDash([]); g.fillStyle = col; g.font = '10px ui-monospace,monospace';
       g.fillText(String(k), i * cw + 4, y(k) - 3);
+    }
+  });
+
+  // ---- session OHLC in every ELAPSED day's column (before today, or before
+  //      the "as of" day). RTH, from 1m bars -- true highs and lows.
+  const cut = V || today;
+  days.forEach((d, i) => {
+    const o = (t.ohlc || {})[d];
+    if (!o || d >= cut) return;
+    for (const [key, col, dash, lw, lab] of [
+        ['h', '#39c5cf', [], 1.5, 'H'], ['l', '#39c5cf', [], 1.5, 'L'],
+        ['o', '#a371f7', [6, 4], 1.5, 'O'], ['c', '#a371f7', [], 2, 'C']]){
+      const v = o[key]; if (v == null || v < lo || v > hi) continue;
+      g.strokeStyle = col; g.lineWidth = lw; g.setLineDash(dash);
+      g.beginPath(); g.moveTo(i * cw + 2, y(v)); g.lineTo((i + 1) * cw - 2, y(v)); g.stroke();
+      g.setLineDash([]);
+      const txt = `${lab} ${v.toFixed(2)}`; g.font = '10px ui-monospace,monospace';
+      const tw = g.measureText(txt).width, tx = (i + 1) * cw - tw - 6;
+      g.fillStyle = '#0d1117cc'; g.fillRect(tx - 2, y(v) - 12, tw + 4, 11);
+      g.fillStyle = col; g.fillText(txt, tx, y(v) - 3);
     }
   });
 
@@ -233,6 +257,11 @@ $('#wrap').addEventListener('mousemove', ev => {
   const pxs = (T().px[days[i]] || []).filter(([m]) => m <= mod), last = pxs[pxs.length - 1];
   let s = `${dlabel(days[i])} expiry\nprice ${p.toFixed(2)}`;
   if (last) s += `   ${hhmm(last[0])} close ${last[1].toFixed(2)}`;
+  const o = (T().ohlc || {})[days[i]];
+  const today = new Date().toLocaleDateString('en-CA', {timeZone: 'America/New_York'});
+  if (o && days[i] < (layout.V || today))
+    s += `\nsession O ${o.o.toFixed(2)}  H ${o.h.toFixed(2)}  L ${o.l.toFixed(2)}  C ${o.c.toFixed(2)}` +
+         (o.final ? '' : '  (not final)');
   if (c){
     const h = c.heat.reduce((b, h) => Math.abs(h[0] - p) < Math.abs(b[0] - p) ? h : b, c.heat[0]);
     s += `\nstrike ${h[0]}  net ${fmtG(h[1])}\n  call ${fmtG(h[2])}  put ${fmtG(h[3])}` +
