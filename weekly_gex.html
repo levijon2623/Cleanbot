@@ -101,6 +101,16 @@ function drawTabs(){
     b.onclick = () => { tk = b.dataset.t; localSet('wk_tk', tk); drawTabs(); fillAsof(); draw(); };
 }
 
+/* Markers (walls, peak, session O/H/L/C): thick lines and bold labels on a
+   dark backing, so they stay readable over bright heat. */
+const MARK_LW = 2.5, MARK_FONT = 'bold 12px ui-monospace,monospace';
+function markLabel(g, txt, x, yv, col){
+  g.font = MARK_FONT;
+  const tw = g.measureText(txt).width;
+  g.fillStyle = '#0d1117d9'; g.fillRect(x - 3, yv - 17, tw + 6, 15);
+  g.fillStyle = col; g.fillText(txt, x, yv - 5);
+}
+
 function T(){ return (doc && doc.tickers && doc.tickers[tk]) || {snapshots:{}, px:{}}; }
 
 function fillAsof(){
@@ -172,12 +182,12 @@ function draw(){
                              : `rgba(248,81,73,${(0.08 + 0.85*a).toFixed(3)})`;
       g.fillRect(i * cw + 1, y(k) - bh / 2, cw - 2, bh);
     }
-    for (const [key, col, dash] of [['call_wall','#58a6ff',[5,4]], ['put_wall','#d29922',[5,4]], ['peak','#e6edf3',[2,3]]]){
+    for (const [key, col, dash] of [['call_wall','#58a6ff',[8,5]], ['put_wall','#d29922',[8,5]], ['peak','#e6edf3',[3,4]]]){
       const k = c[key]; if (k == null || k < lo || k > hi) continue;
-      g.strokeStyle = col; g.lineWidth = 1.5; g.setLineDash(dash);
+      g.strokeStyle = col; g.lineWidth = MARK_LW; g.setLineDash(dash);
       g.beginPath(); g.moveTo(i * cw + 2, y(k)); g.lineTo((i + 1) * cw - 2, y(k)); g.stroke();
-      g.setLineDash([]); g.fillStyle = col; g.font = '10px ui-monospace,monospace';
-      g.fillText(String(k), i * cw + 4, y(k) - 3);
+      g.setLineDash([]);
+      markLabel(g, String(k), i * cw + 4, y(k), col);
     }
   });
 
@@ -188,16 +198,15 @@ function draw(){
     const o = (t.ohlc || {})[d];
     if (!o || d >= cut) return;
     for (const [key, col, dash, lw, lab] of [
-        ['h', '#39c5cf', [], 1.5, 'H'], ['l', '#39c5cf', [], 1.5, 'L'],
-        ['o', '#a371f7', [6, 4], 1.5, 'O'], ['c', '#a371f7', [], 2, 'C']]){
+        ['h', '#39c5cf', [], MARK_LW, 'H'], ['l', '#39c5cf', [], MARK_LW, 'L'],
+        ['o', '#a371f7', [9, 5], MARK_LW, 'O'], ['c', '#a371f7', [], MARK_LW + 0.5, 'C']]){
       const v = o[key]; if (v == null || v < lo || v > hi) continue;
       g.strokeStyle = col; g.lineWidth = lw; g.setLineDash(dash);
       g.beginPath(); g.moveTo(i * cw + 2, y(v)); g.lineTo((i + 1) * cw - 2, y(v)); g.stroke();
       g.setLineDash([]);
-      const txt = `${lab} ${v.toFixed(2)}`; g.font = '10px ui-monospace,monospace';
-      const tw = g.measureText(txt).width, tx = (i + 1) * cw - tw - 6;
-      g.fillStyle = '#0d1117cc'; g.fillRect(tx - 2, y(v) - 12, tw + 4, 11);
-      g.fillStyle = col; g.fillText(txt, tx, y(v) - 3);
+      const txt = `${lab} ${v.toFixed(2)}`;
+      g.font = MARK_FONT;
+      markLabel(g, txt, (i + 1) * cw - g.measureText(txt).width - 8, y(v), col);
     }
   });
 
