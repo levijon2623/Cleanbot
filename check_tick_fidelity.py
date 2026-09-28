@@ -64,6 +64,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ticker", default="IWM")
     ap.add_argument("--seconds", type=int, default=90)
+    # Webull's docs list TICK for stocks/futures/crypto only, but the SDK's
+    # Category enum has US_OPTION and the bot already streams option QUOTES
+    # that way. One OCC symbol here answers "do option ticks stream at all?" in
+    # the same 90 seconds. Ticks for it are counted separately from the equity.
+    ap.add_argument("--option", default=None,
+                    help="also subscribe TICK on this OCC symbol, e.g. IWM260928C00285000")
     a = ap.parse_args()
     quiet_webull_logging()
 
@@ -73,6 +79,7 @@ def main():
     snap_n = 0
     snap_first = snap_last = None
     samples = []
+    opt = {"n": 0, "vol": 0, "samples": []}
 
     sc = DataStreamingClient(
         app_key=os.getenv("WEBULL_APP_KEY"),
@@ -94,12 +101,25 @@ def main():
                          category=Category.US_STOCK.name,
                          sub_types=[SubscribeType.TICK.name,
                                     SubscribeType.SNAPSHOT.name])
+        if a.option:
+            try:
+                client.subscribe(symbols=[a.option],
+                                 category=Category.US_OPTION.name,
+                                 sub_types=[SubscribeType.TICK.name])
+                print(f"  subscribed TICK for option {a.option}")
+            except Exception as e:
+                print(f"  option TICK subscribe REFUSED: {e}")
 
     def on_message(client, topic, payload):
         nonlocal tick_n, tick_vol, snap_n, snap_first, snap_last
         s = str(payload)
         tp = str(topic or "").lower()
-        if "tick" in tp:
+        if "tick" in tp and a.option and f"symbol:{a.option}" in s:
+            opt["n"] += 1
+            opt["vol"] += sum(int(v) for v in re.findall(r'(?<![a-z_])volume:\s*"?(\d+)', s))
+            if len(opt["samples"]) < 2:
+                opt["samples"].append(s[:300])
+        elif "tick" in tp:
             tick_n += 1
             if len(samples) < 3:
                 samples.append(s[:400])
@@ -171,6 +191,19 @@ def main():
         print(f"\n  no `side` field parsed -- the regex may need the raw shape:")
     for i, s in enumerate(samples):
         print(f"    sample {i}: {s}")
+
+    if a.option:
+        print(f"\n  OPTION TICKS for {a.option}: {opt['n']:,} messages, "
+              f"{opt['vol']:,} contracts")
+        if opt["n"]:
+            print("  -> option ticks DO stream. Fidelity for options would need its")
+            print("     own check (no option SNAPSHOT volume is subscribed here).")
+            for s in opt["samples"]:
+                print(f"    sample: {s}")
+        else:
+            print("  -> none received. Either option TICK is not served, or this")
+            print("     contract did not trade in the window -- pick a busy ATM")
+            print("     0DTE contract so silence means the former.")
     try:
         sc.disconnect()
     except Exception:

@@ -152,13 +152,24 @@ DEFAULT_OHLC_CANDLE = "1m"
 # net_delta (the share-equivalent dealer hedge). One incremental file per ticker,
 # same shape as the OHLC backfill.
 #
-# HISTORY FLOOR: 2023-10-12, measured against the live API on 2026-09-12 by
-# binary search. /option-trades/full-tape has the IDENTICAL floor. Both 403
-# before it. This is a FIXED floor, not a rolling window -- 2023-10-12 still
-# served fine two years on, so nothing already downloaded is expiring. (The
-# `_fetch_netprem_day` docstring below used to call it a "~2yr rolling window",
-# which would have meant the lake's own 2024-08-20 start was already aging out.
-# It is not. Re-measure with scratch probe_narrow.py before trusting either.)
+# 🚨 HISTORY FLOOR: A ROLLING WINDOW OF ~35 MONTHS. IT MOVES A DAY A DAY.
+#   2026-09-12  floor measured 2023-10-12 (binary search)
+#   2026-09-26  floor measured 2023-10-26 -- the trades-core backfill got
+#               HTTP 403 on every day 2023-10-12..10-25 and 200 from 10-26
+# Fourteen days later, fourteen days lost: ~1,066 calendar days back from today.
+# /option-trades/full-tape and net-prem-ticks shared the floor when first
+# measured; assume both roll.
+#
+# This note used to say the opposite -- "a FIXED floor, not a rolling window,
+# nothing already downloaded is expiring" -- on the strength of one measurement,
+# which cannot distinguish a fixed floor from a slow-moving one. Two
+# measurements a fortnight apart can. The consequence is concrete: data ALREADY
+# on disk is safe, but any backfill not yet run loses its oldest day every day
+# it waits. Plan backfills from the oldest end.
+#
+# Also permanently unavailable, vendor-side: 2025-04-04 (zip fails CRC) and
+# 2025-09-29 (zip has a bad header). Both re-downloaded 2026-09-26 with the same
+# error, and both are absent from option-contracts-1m for the same reason.
 NETPREM_NUMERIC: tuple[str, ...] = ("net_call_premium", "net_put_premium", "net_delta")
 NETPREM_PREFIX = "NETPREM"
 
@@ -461,6 +472,149 @@ def build_one(client: Client, d: date, lake: Path) -> ConvertResult | None:
     zip_path.unlink(missing_ok=True)
     result.csv_path.unlink(missing_ok=True)
     return result
+
+# =====================================================================
+# TRADES-CORE -- the trade-level tape, filtered and kept; the raw day is not
+# =====================================================================
+# lake/silver/trades-core/date=YYYY-MM-DD/trades.parquet
+#
+# WHY A SECOND SILVER LAYER. option-contracts-1m aggregates a day to contract-
+# minutes, which throws away the two things a front-running test needs: WHEN
+# inside the minute a trade printed, and WHAT KIND of trade it was (sweep,
+# block, auction, multi-leg). This keeps individual trades, but only for the
+# tickers asked for and only the columns that carry those things -- ~30 MB/day
+# against ~1 GB for the full bronze parquet and ~2.6 GB for the download.
+#
+# 🚨 THE FULL BRONZE DAY IS NEVER WRITTEN. The existing `build` path writes the
+# 49-column parquet and keeps it; 714 such days would be ~670 GB, which does not
+# fit on this machine. Here the CSV is filtered on the way to parquet and the
+# zip and CSV are deleted in a `finally`, so a crash mid-day cannot strand
+# 10 GB of temp files. The price: re-deriving a column not kept here means
+# re-downloading. The columns below were chosen to be the complete set a
+# trade-level flow study reads; widen TRADES_CORE_COLUMNS BEFORE a backfill,
+# not after.
+#
+# 🚨 VALIDATED AGAINST option-contracts-1m, EVERY DAY. check_opra_multileg
+# proved (2026-09-26) that silver's per-contract-minute volume equals the tape
+# exactly. So each day's kept, non-canceled volume per ticker must match
+# silver's to within 0.1%, or the day is NOT written. That is an independent
+# source for the same number, which is the check that catches a bad filter, a
+# truncated download or a parse change -- a self-consistency count would not.
+TRADES_CORE_DATASET = "trades-core"
+TRADES_CORE_FILE = "trades.parquet"
+TRADES_CORE_TICKERS: tuple[str, ...] = ("SPY", "QQQ", "IWM")
+# Only columns present in the ORIGINAL 40-column tape, so every day in the
+# 2023-10-12.. history has all of them (see validate_bronze on the widening).
+TRADES_CORE_COLUMNS: tuple[str, ...] = (
+    "underlying_symbol", "executed_at", "option_type", "strike", "expiry",
+    "size", "price", "nbbo_bid", "nbbo_ask", "underlying_price",
+    "upstream_condition_detail", "report_flags", "tags", "exchange",
+    "canceled",
+)
+TRADES_CORE_TOLERANCE = 0.001
+TRADES_CORE_RETRIES = 3
+
+
+def trades_core_path(lake: Path, d: date) -> Path:
+    return silver_dir(lake) / TRADES_CORE_DATASET / f"date={d.isoformat()}" / TRADES_CORE_FILE
+
+
+def _trades_core_frame(lf: pl.LazyFrame, tickers: Sequence[str]) -> pl.DataFrame:
+    """Filter and type one day's tape. Explicit casts: CSV inference and the
+    bronze parquet disagree on some types (expiry is String in bronze), and a
+    lake whose partitions disagree on a dtype fails at scan time, months later."""
+    ts = pl.col("executed_at")
+    if lf.collect_schema().get("executed_at") == pl.String:
+        ts = ts.str.to_datetime(time_unit="us", time_zone="UTC", strict=False)
+    return (lf.filter(pl.col("underlying_symbol").is_in(list(tickers)))
+            .select(TRADES_CORE_COLUMNS)
+            .with_columns(
+                ts.alias("executed_at"),
+                pl.col("expiry").cast(pl.String).str.slice(0, 10).str.to_date(),
+                pl.col("strike").cast(pl.Float64),
+                pl.col("size").cast(pl.Int64),
+                pl.col("price", "nbbo_bid", "nbbo_ask", "underlying_price").cast(pl.Float64),
+                pl.col("upstream_condition_detail", "report_flags", "tags", "exchange",
+                       "canceled").cast(pl.String))
+            .sort("executed_at")
+            .collect())
+
+
+def _validate_trades_core(df: pl.DataFrame, lake: Path, d: date,
+                          tickers: Sequence[str]) -> tuple[list[str], str]:
+    problems: list[str] = []
+    nulls = df["executed_at"].null_count()
+    if nulls:
+        problems.append(f"{nulls} unparseable executed_at")
+    sil = silver_partition_path(lake, d)
+    if not sil.exists():
+        return problems, "no option-contracts-1m partition to check against"
+    ref = (pl.scan_parquet(sil).filter(pl.col("underlying_symbol").is_in(list(tickers)))
+           .group_by("underlying_symbol").agg(pl.col("volume").sum()).collect())
+    # fill_null first: `null != "t"` is null, and filter() drops nulls -- a
+    # blank flag would silently remove a real trade from the volume count.
+    got = (df.filter(pl.col("canceled").fill_null("f") != "t").group_by("underlying_symbol")
+           .agg(pl.col("size").sum()))
+    j = ref.join(got, on="underlying_symbol", how="full", coalesce=True).fill_null(0)
+    worst = 0.0
+    for r in j.iter_rows(named=True):
+        denom = max(r["volume"], 1)
+        err = abs(r["size"] - r["volume"]) / denom
+        worst = max(worst, err)
+        if err > TRADES_CORE_TOLERANCE:
+            problems.append(f"{r['underlying_symbol']} volume {r['size']:,} vs silver "
+                            f"{r['volume']:,} ({err:.3%})")
+    return problems, f"matches silver volume (worst {worst:.4%})"
+
+
+def build_trades_core_one(client: "Client", d: date, lake: Path,
+                          tickers: Sequence[str] = TRADES_CORE_TICKERS) -> str:
+    """One day -> trades-core. Returns a one-line status. Raises FatalError."""
+    out_path = trades_core_path(lake, d)
+    if out_path.exists():
+        return "exists"
+    t0 = time.time()
+    day_work = work_dir(lake) / f"core_{d.isoformat()}"
+    zip_path = day_work / f"full_tape_{d.strftime('%Y%m%d')}.zip"
+    zip_bytes = 0
+    try:
+        local = bronze_path(lake, d)
+        if local.exists():
+            # already have the full bronze day: derive, don't re-download
+            df = _trades_core_frame(pl.scan_parquet(local), tickers)
+            src = "local bronze"
+        else:
+            for attempt in range(1, TRADES_CORE_RETRIES + 1):
+                try:
+                    client.download(d, zip_path)
+                    break
+                except NoDataForDate:
+                    return "no tape (holiday or not yet published)"
+                except (httpx.HTTPError, FatalError) as e:
+                    if attempt == TRADES_CORE_RETRIES:
+                        raise FatalError(f"download failed after {attempt} attempts: {e}")
+                    time.sleep(10 * attempt)
+            zip_bytes = zip_path.stat().st_size
+            csv_path = extract_csv(zip_path, day_work)
+            zip_path.unlink(missing_ok=True)       # free 2.6 GB before parsing
+            df = _trades_core_frame(pl.scan_csv(csv_path, infer_schema_length=INFER_SCHEMA_ROWS), tickers)
+            src = f"download {human_bytes(zip_bytes)}"
+        problems, note = _validate_trades_core(df, lake, d, tickers)
+        if problems:
+            raise FatalError("trades-core validation failed: " + "; ".join(problems))
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out_path.with_suffix(".tmp")
+        df.write_parquet(tmp, compression=PARQUET_COMPRESSION,
+                         compression_level=PARQUET_COMPRESSION_LEVEL)
+        tmp.replace(out_path)                        # atomic: no half-written day
+        return (f"{df.height:,} trades, {human_bytes(out_path.stat().st_size)}, "
+                f"{src}, {note}, {time.time() - t0:.0f}s")
+    finally:
+        if day_work.exists():
+            for p in day_work.iterdir():
+                p.unlink(missing_ok=True)
+            day_work.rmdir()
+
 
 # =====================================================================
 # SILVER BUILDER
@@ -822,6 +976,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     b.add_argument("end", type=date.fromisoformat, nargs="?", default=None)
     b.add_argument("--confirm", action="store_true")
 
+    tc = sub.add_parser("trades-core-build",
+                        help="trade-level tape for a few tickers -> silver/trades-core (raw day deleted)")
+    tc.add_argument("start", type=date.fromisoformat)
+    tc.add_argument("end", type=date.fromisoformat, nargs="?", default=None)
+    tc.add_argument("--tickers", nargs="+", default=list(TRADES_CORE_TICKERS))
+    tc.add_argument("--workers", type=int, default=3,
+                    help="days downloaded in parallel (each needs ~11 GB of temp space)")
+    tc.add_argument("--confirm", action="store_true")
+
     sb = sub.add_parser("silver-build", help="build 1-min per-contract bars")
     sb.add_argument("start", type=date.fromisoformat)
     sb.add_argument("end", type=date.fromisoformat, nargs="?", default=None)
@@ -879,6 +1042,48 @@ def main(argv: Sequence[str] | None = None) -> int:
             progress(f"Building bronze for {d.isoformat()}...")
             build_one(client, d, DEFAULT_LAKE)
         print("Bronze build complete!")
+
+    elif args.command == "trades-core-build":
+        if not api_key: raise FatalError("API Key required.")
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import shutil
+        client = Client(api_key)
+        tickers = [t.upper() for t in args.tickers]
+        days = [d for d in trading_days(args.start, args.end or args.start)
+                if not trades_core_path(DEFAULT_LAKE, d).exists()]
+        need = len([d for d in days if not bronze_path(DEFAULT_LAKE, d).exists()])
+        progress(f"trades-core: {len(days)} day(s) to build, {need} need a download, "
+                 f"{args.workers} in parallel, tickers {' '.join(tickers)}")
+        if need > 200 and not args.confirm:
+            raise FatalError(f"{need} downloads planned; re-run with --confirm.")
+        # 🚨 REFUSE TO START WITHOUT ROOM FOR EVERY WORKER. A disk that fills
+        # mid-CSV-extract leaves a truncated file that parses into a short day;
+        # the silver volume check would catch it, but only after the damage.
+        free = shutil.disk_usage(DEFAULT_LAKE).free
+        want = args.workers * (ZIP_BYTES_PER_DAY + CSV_BYTES_PER_DAY) * 1.2
+        if free < want:
+            raise FatalError(f"{human_bytes(free)} free, {human_bytes(want)} needed for "
+                             f"{args.workers} workers; lower --workers.")
+        ok = failed = 0
+        t0 = time.time()
+        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
+            futs = {ex.submit(build_trades_core_one, client, d, DEFAULT_LAKE, tickers): d
+                    for d in days}
+            for f in as_completed(futs):
+                d = futs[f]
+                try:
+                    out(f"  {d.isoformat()}  {f.result()}")
+                    ok += 1
+                except Exception as e:                    # one bad day must not stop 700
+                    out(f"  {d.isoformat()}  FAILED: {e}")
+                    failed += 1
+                done = ok + failed
+                if done % 10 == 0 or done == len(days):
+                    el = time.time() - t0
+                    progress(f"  -- {done}/{len(days)} days, {el / 60:.0f} min elapsed, "
+                             f"~{el / done * (len(days) - done) / 60:.0f} min left")
+        print(f"trades-core complete: {ok} ok, {failed} failed"
+              + ("  (re-run the same range to retry; finished days are skipped)" if failed else ""))
 
     elif args.command == "silver-build":
         for d in trading_days(args.start, args.end or args.start):
