@@ -1468,7 +1468,9 @@ class FlowExecutionEngine:
             if spot == 0.0: continue
 
             # --- USING THE HIGH-SPEED PRE-FILTER ---
-            chain_data = self.webull.scan_option_chain(ticker, spot_price=spot)
+            # basket_chain: symbols only, cached directory -- see its docstring
+            chain_data = self.webull.basket_chain(
+                ticker, spot, max_dte=max([0, *required_specs["CALL"], *required_specs["PUT"]]))
             if not chain_data: continue
 
             new_basket, new_occs = self._build_basket_from_chain(ticker, spot, chain_data, required_specs)
@@ -1483,13 +1485,16 @@ class FlowExecutionEngine:
                 self.webull.subscribe_to_option(occ)
 
     def _rebalance_basket(self, ticker: str, spot: float):
-        """Background Thread: Shifts the basket if price drifts > 1.5%."""
+        """Background thread: re-centre the basket on `spot` (see the strike
+        drift rebalancer in run_brain for when)."""
         try:
             print(f"  🔄 [BASKET REBALANCE] {ticker} drifted to ${spot:.2f}. Shifting strikes...")
             required_specs = self._determine_required_dtes(ticker)
             
             # --- USING THE HIGH-SPEED PRE-FILTER ---
-            chain_data = self.webull.scan_option_chain(ticker, spot_price=spot)
+            # basket_chain: symbols only, cached directory -- see its docstring
+            chain_data = self.webull.basket_chain(
+                ticker, spot, max_dte=max([0, *required_specs["CALL"], *required_specs["PUT"]]))
             if not chain_data: return
                 
             new_basket, new_occs = self._build_basket_from_chain(ticker, spot, chain_data, required_specs)
@@ -1806,12 +1811,53 @@ class FlowExecutionEngine:
                 for ticker in tickers_to_track:
                     spot_price = self.get_spot_price(ticker)
                     if spot_price == 0.0: continue
-                        
+
+                    # 🚨 NO BASKET AT ALL -> BUILD ONE NOW. The basket is built
+                    # at startup and at the midnight rollover, both of which
+                    # skip a ticker whose spot is 0. A process that has been
+                    # running still holds the last close, so the rollover
+                    # works; a process STARTED overnight has no tick yet and
+                    # builds nothing. Observed 2026-09-28: a 00:08 restart left
+                    # every basket empty, the rebalancer below measured drift
+                    # from a missing anchor (0%, never fires), and the strike
+                    # strip stayed blank into the session. Retried at most
+                    # once a minute per ticker.
+                    if ticker not in self.anchor_prices:
+                        retry = getattr(self, "_basket_retry", None)
+                        if retry is None:
+                            retry = self._basket_retry = {}
+                        if (not self.is_rebalancing.get(ticker, False)
+                                and time.time() - retry.get(ticker, 0) >= 60):
+                            retry[ticker] = time.time()
+                            self.is_rebalancing[ticker] = True
+                            print(f"  🧺 [BASKET] {ticker}: no basket yet -- building at ${spot_price:.2f}")
+                            threading.Thread(target=self._rebalance_basket,
+                                             args=(ticker, spot_price), daemon=True).start()
+                        continue
+
+                    # 🚨 SHIFT ON ONE STRIKE, NOT 1.5%. The basket is ATM +/- 2
+                    # strikes -- about +/-0.3% on SPY -- but only re-centred
+                    # after a 1.5% move (~$11.50 on SPY), so on a fast day
+                    # every strike in the viewer's strip went stale long before
+                    # a shift fired. Observed 2026-09-28: a manual SPY put had
+                    # to be placed from the phone. Now: re-centre once spot is
+                    # one strike step from the anchor (step = the basket's own
+                    # strike spacing), at most once per 10s per ticker. Each
+                    # shift is instant (basket_chain, cached directory) and
+                    # only adds/drops the edge strikes; held contracts are
+                    # never unsubscribed (_rebalance_basket).
                     anchor = self.anchor_prices.get(ticker, spot_price)
-                    drift_pct = abs(spot_price - anchor) / anchor if anchor > 0 else 0.0
-                    
-                    # If price drifted > 1.5% and a thread isn't already running, rebalance!
-                    if drift_pct >= 0.015 and not self.is_rebalancing.get(ticker, False):
+                    ks = sorted({c["strike"] for d in (self.options_basket.get(ticker) or {}).values()
+                                 for lst in d.values() for c in lst})
+                    gaps = [b - a for a, b in zip(ks, ks[1:]) if b > a]
+                    step = sorted(gaps)[len(gaps) // 2] if gaps else anchor * 0.015
+                    last = getattr(self, "_last_rebalance", None)
+                    if last is None:
+                        last = self._last_rebalance = {}
+                    if (abs(spot_price - anchor) >= step
+                            and time.time() - last.get(ticker, 0) >= 10
+                            and not self.is_rebalancing.get(ticker, False)):
+                        last[ticker] = time.time()
                         self.is_rebalancing[ticker] = True
                         threading.Thread(target=self._rebalance_basket, args=(ticker, spot_price), daemon=True).start()
 

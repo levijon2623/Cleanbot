@@ -585,6 +585,69 @@ class WebullGammaClient:
             print(f"🚨 Failed to fetch account health: {e}")
             return None
 
+    # Contract DIRECTORY per underlying, cached: {ticker: (epoch, [symbols])}.
+    # Listings change a few times a day at most (new strikes on a big move),
+    # so 15 minutes is plenty -- and it turns a basket shift during a fast
+    # move from ~10 paged requests into none.
+    _DIR_TTL = 900.0
+
+    def _option_directory(self, ticker: str):
+        cache = self.__dict__.setdefault("_dir_cache", {})
+        hit = cache.get(ticker)
+        if hit and time.time() - hit[0] < self._DIR_TTL:
+            return hit[1]
+        syms, last_id = [], None
+        while True:
+            kwargs = {"category": "US_OPTION", "underlying_symbols": ticker, "page_size": 1000}
+            if last_id:
+                kwargs["last_instrument_id"] = last_id
+            resp = self.data_client.instrument.get_option_contracts(**kwargs)
+            data = resp.json() if hasattr(resp, "json") else resp
+            if not data or not isinstance(data, list):
+                break
+            syms.extend(c.get("symbol") for c in data if c.get("symbol"))
+            if len(data) < 1000:
+                break
+            last_id = data[-1].get("instrument_id")
+        if syms:
+            cache[ticker] = (time.time(), syms)
+        return syms
+
+    def basket_chain(self, ticker: str, spot_price: float, max_dte: int = 7, band: float = 0.03):
+        """The chain the options BASKET needs, fast: contract symbols only.
+
+        🚨 WHY NOT scan_option_chain. That pulls a snapshot for every contract
+        within 5% of spot and 14 days -- ~1,500 on SPY, 20 per request with a
+        0.3s pause, so a basket shift took tens of seconds, during exactly the
+        fast moves that trigger one. The basket only needs strike, expiry and
+        call/put, all of which are IN the OCC symbol; the one snapshot field
+        it stored (IV) is read nowhere. Same return shape, no snapshots, and
+        the directory is cached (_option_directory). 2026-09-28.
+        """
+        try:
+            syms = self._option_directory(ticker)
+        except Exception as e:
+            print(f"🚨 Option directory fetch failed for {ticker}: {e}")
+            return None
+        today = datetime.now().date()
+        out = []
+        for sym in syms:
+            if sym[0].isdigit():                  # adjusted contracts (e.g. 1NVDA)
+                continue
+            try:
+                strike = float(sym[-8:]) / 1000.0
+                exp = datetime.strptime(f"20{sym[-15:-9]}", "%Y%m%d").date()
+            except (ValueError, IndexError):
+                continue
+            if not (0 <= (exp - today).days <= max_dte):
+                continue
+            if abs(strike - spot_price) / spot_price > band:
+                continue
+            out.append({"symbol": sym, "strikePrice": str(strike),
+                        "expireDate": exp.isoformat(),
+                        "callPut": "Call" if sym[-9] == "C" else "Put"})
+        return {"data": out}
+
     def scan_option_chain(self, ticker: str, spot_price: float = None):
         """Fetches the entire option chain directory and batches requests."""
         print(f"🔍 Fetching full options directory for {ticker}...")
