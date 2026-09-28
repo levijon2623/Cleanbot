@@ -466,10 +466,18 @@ function draw(d){
    Phase 1 shows flow + EMA + the live percentile gate + position state.
    Price candles need 1m OHLC in the emit, which costs UW calls -- phase 2.  */
 let LIVE = null, liveTimer = null, liveTk = null, liveSeries = null;
+/* LIVE MODE SURVIVES NAVIGATION. Going to weekly_gex.html and back reloads
+   this page, which used to drop you into historical mode and lose the ticker
+   you were on. The mode, the ticker and the open strike strip are kept in
+   this browser's localStorage and restored on load. Per-browser only, and
+   every access is guarded (private windows can refuse storage).            */
+function uiGet(k){ try { return localStorage.getItem(k); } catch(e){ return null; } }
+function uiSet(k, v){ try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch(e){} }
 let LIVEVOL = {};        // et_stamp -> [volume, rvol], for the crosshair readout
 
 function liveStop(){
   clearInterval(liveTimer); liveTimer = null; LIVE = null; liveSeries = null;
+  uiSet('fv_live', null);
   $('#liveBtn').classList.remove('on'); $('#liveBtn').textContent = '● GO LIVE';
   $('#liveInfo').textContent = '';
   // the order desk is meaningless without a live engine behind it
@@ -690,6 +698,7 @@ function liveDraw(d, s){
 
 $('#liveBtn').onclick = () => {
   if(liveTimer) return liveStop();
+  uiSet('fv_live', '1');
   $('#liveBtn').classList.add('on');
   $('#liveBtn').textContent = '■ STOP LIVE';
   liveSeries = null;
@@ -748,6 +757,7 @@ function liveList(d){
       if(t !== liveTk){ liveTk = t; liveSeries = null; }
       // only the three tradeable ETFs carry a chain, so only they drop down
       openTk = ((LIVE.chains||{})[t] || []).length && openTk !== t ? t : null;
+      uiSet('fv_liveTk', liveTk); uiSet('fv_openTk', openTk);
       livePoll();
     });
   [...document.querySelectorAll('tr[data-oid]')].forEach(el =>
@@ -1279,7 +1289,14 @@ addEventListener('keydown', e => {
   renderList();
   const first = visible()[0];
   if(first) load(first.file);
-})();
+})().finally(() => {
+  // back in live mode if that is where you left it (see uiGet above)
+  if(uiGet('fv_live') === '1' && !liveTimer){
+    liveTk = uiGet('fv_liveTk') || null;
+    openTk = uiGet('fv_openTk') || null;
+    $('#liveBtn').click();
+  }
+});
 </script>
 </body>
 </html>
