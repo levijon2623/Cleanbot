@@ -84,6 +84,16 @@ can leave. (The account figure under the premium is blurred.)
 
 ![Staging a manual SPY order](docs/images/order-staging-spy.png)
 
+**Underlying TP/SL.** With it enabled, T + click on the price chart sets a
+take-profit and S + click a stop-loss at that UNDERLYING price — on a live
+manual hold, or, as here, staged with an order (dashed until it fills). The
+bot watches the levels itself, needs price through a level for 2 seconds
+before acting, and closes marketable with the same 911 escalation as the
+Close button. A level on the wrong side of spot for the option's direction
+is refused. (The account figure under the premium is blurred.)
+
+![Underlying TP/SL staged with a SPY 0DTE call](docs/images/underlying-tpsl-staged.png)
+
 **Weekly GEX (`weekly_gex.html`).** The week's 0–4DTE gamma map: one column
 per trading day, each drawn from that day's expiry as snapshotted each
 morning, with walls and peak derived per expiry and the price line walking
