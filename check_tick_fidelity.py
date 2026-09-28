@@ -33,8 +33,36 @@ THE MEASUREMENT
 🚨 A DISTINCT session_id IS MANDATORY
     "A new connection with the same session_id will disconnect the previous
     one." Reusing the bot's id would silently kill the live bot's market data
-    while it holds positions. The id below is unique per run. Each App Key also
-    allows 5 concurrent connections; the bot uses one, this uses one more.
+    while it holds positions. The id below is unique per run.
+
+🚨🚨 AND EVEN THEN, RUNNING THIS FREEZES THE BOT'S PRICES. The docs say each
+    App Key allows 5 concurrent connections. In practice, 2026-09-28 10:09: a
+    run of this script with a distinct session_id, from the laptop, on the
+    SAME App Key as the cloud bot, stopped every equity push to the bot --
+    all nine tickers, not just the one subscribed here -- with NO disconnect
+    logged. The bot's spot sat at 10:10 values until a restart at 10:21.
+    Only run this when the bot holds nothing and nobody is trading from the
+    viewer, and RESTART THE BOT AFTERWARDS (systemctl restart cleanbot).
+
+RESULT 2026-09-28 10:09, IWM, 90s: tick volume / snapshot volume delta =
+    39,319 / 82,077 = 0.48 -- PARTIAL. 333 messages (3.7/s), one trade each,
+    so the push cap drops trades and drops more when the tape is busiest.
+    Side on the ticks that did arrive: N 137, S 124, B 54, G 15, L 3 -- about
+    half carry no usable aggressor side. CVD from this stream is not viable.
+    Option TICK does stream (IWM260928C00281000: 225 messages, 1,171
+    contracts in the same 90s); its fidelity is measured by --option against
+    UW's volume for that contract (see below).
+
+RESULT 2026-09-28 11:06, 300s (IWM + IWM260928C00279000, the ATM 0DTE call):
+    EQUITY  219,616 / 356,695 shares = 0.62 -- PARTIAL again (1,005
+            messages, 3.4/s). Side: N 454, S 273, B 266, L 6, G 6.
+    OPTION  1,111 contracts in ticks vs UW's cumulative volume 4,322 ->
+            5,438 (delta 1,116) = 0.996 -- FULL. 207 messages, each with
+            price, size and side (B/S/G seen). A single busy 0DTE contract
+            sits well under the push cap, so nothing is dropped.
+    So a per-contract option tape with aggressor side IS available live from
+    Webull, for a handful of contracts per connection -- but only on the
+    bot's OWN connection (a second one freezes it; see above).
 
 Usage:
   python check_tick_fidelity.py --ticker IWM --seconds 90
@@ -60,6 +88,32 @@ from webull.data.common.subscribe_type import SubscribeType
 from webull_gamma_client import _stdlib_ssl_context, quiet_webull_logging
 
 
+def uw_contract_volume(occ):
+    """Today's cumulative volume for one option contract from UW
+    /option-contracts, paged until the symbol is found. None if not found.
+    A few requests per call (the chain is paged at 500 rows)."""
+    import requests
+    und = re.match(r"[A-Z]+", occ).group(0)
+    h = {"Authorization": f"Bearer {os.getenv('UW_API_KEY', '')}", "Accept": "application/json"}
+    for page in range(20):
+        try:
+            r = requests.get(f"https://api.unusualwhales.com/api/stock/{und}/option-contracts",
+                             headers=h, params={"limit": 500, "page": page,
+                                                "exclude_zero_vol_chains": "true"}, timeout=20)
+            rows = r.json().get("data", []) if r.status_code == 200 else []
+        except Exception:
+            return None
+        for x in rows:
+            if x.get("option_symbol") == occ:
+                try:
+                    return int(x.get("volume") or 0)
+                except (TypeError, ValueError):
+                    return None
+        if len(rows) < 500:
+            return None
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ticker", default="IWM")
@@ -72,6 +126,11 @@ def main():
                     help="also subscribe TICK on this OCC symbol, e.g. IWM260928C00285000")
     a = ap.parse_args()
     quiet_webull_logging()
+    # Option fidelity reference: UW's cumulative volume for the same contract,
+    # read at both ends of the window (the option has no SNAPSHOT here).
+    uw_start = uw_contract_volume(a.option) if a.option else None
+    if a.option:
+        print(f"  UW volume for {a.option} at start: {uw_start}")
 
     tick_n = 0
     tick_vol = 0
@@ -193,11 +252,21 @@ def main():
         print(f"    sample {i}: {s}")
 
     if a.option:
+        uw_end = uw_contract_volume(a.option)
         print(f"\n  OPTION TICKS for {a.option}: {opt['n']:,} messages, "
               f"{opt['vol']:,} contracts")
         if opt["n"]:
-            print("  -> option ticks DO stream. Fidelity for options would need its")
-            print("     own check (no option SNAPSHOT volume is subscribed here).")
+            print("  -> option ticks DO stream.")
+            if uw_start is not None and uw_end is not None and uw_end > uw_start:
+                d = uw_end - uw_start
+                r = opt["vol"] / d
+                print(f"  UW cumulative volume   {uw_start:,} -> {uw_end:,}   delta {d:,}")
+                print(f"  OPTION FIDELITY  tick contracts / UW delta = {r:.3f}"
+                      f"   ({'FULL' if r >= 0.9 else 'PARTIAL' if r >= 0.2 else 'HEAVILY SAMPLED'})")
+                print("  (UW's volume can lag the tape by seconds; over a 300s window that")
+                print("   moves the ratio by a few percent, not by a factor.)")
+            else:
+                print(f"  UW volume reference unavailable (start {uw_start}, end {uw_end}).")
             for s in opt["samples"]:
                 print(f"    sample: {s}")
         else:
