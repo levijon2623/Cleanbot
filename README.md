@@ -63,6 +63,34 @@ imports Hyperliquid. If you are not certain you are eligible, leave every
 
 ---
 
+## Screenshots
+
+**Live flow viewer (`flow_viewer.html`), QQQ.** Price with session VWAP,
+the 0–1DTE gamma heat by strike and the gamma flip, volume bars shaded by
+relative volume, and below them the flow pane the bot trades on: cumulative
+net premium, its EMA(5), and sweeps-only flow.
+
+![Live flow viewer, QQQ](docs/images/viewer-live-qqq.png)
+
+**Strike strip.** Each tradeable ETF drops down to its live basket — the
+0DTE calls a rule trades and the puts kept for discretionary orders — with
+bid/ask, volume and open interest, re-centred on spot as price moves.
+
+![Live flow viewer, SPY strike strip](docs/images/viewer-live-spy-strikes.png)
+
+**Staging a manual order.** A marketable limit, the maximum premium it can
+commit, and a 15-minute arming window that has to be opened before any order
+can leave. (The account figure under the premium is blurred.)
+
+![Staging a manual SPY order](docs/images/order-staging-spy.png)
+
+**Weekly GEX (`weekly_gex.html`).** The week's 0–4DTE gamma map: one column
+per trading day, each drawn from that day's expiry as snapshotted each
+morning, with walls and peak derived per expiry and the price line walking
+across the week.
+
+![Weekly 0-4DTE GEX, QQQ](docs/images/weekly-gex-qqq.png)
+
 ## Quick start
 
 ```sh
