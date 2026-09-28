@@ -62,6 +62,31 @@ def market_now() -> datetime:
     return datetime.now(MARKET_TZ)
 
 
+def tracked_tickers() -> list:
+    """The tickers the live loop polls, streams and seeds.
+
+    RULES mode: ENABLED-rule tickers only. Trimmed from the whole WATCHLIST on
+    2026-09-27 when UW went to the Basic plan (40,000 requests/day, no socket):
+    REST flow every 15s is ~1,600 requests per ticker per session and VWAP bars
+    another ~200, so the six names no enabled rule trades (AAPL AMZN GOOGL TSLA
+    MU LULU) cost ~10,800 a day to compute a flow line nothing reads.
+
+    What this drops for those names: live cum_flow, their crossovers in
+    flow_trigger_log.jsonl, and their rows in the viewer. Re-enabling a rule
+    re-adds its ticker on the next restart, and its gate history is rebuilt
+    from historical/NETPREM{T}.parquet by rebuild_flow_trigger_log.py rather
+    than waited for (refresh with `uw_options_data_lake netprem-build` first).
+    Legacy (USE_RULES False) mode keeps the whole WATCHLIST, as before.
+    """
+    if not USE_RULES:
+        return list(WATCHLIST.keys())
+    out = []
+    for r in RULES:
+        if r.get("enabled", True) and r["ticker"] not in out:
+            out.append(r["ticker"])
+    return out
+
+
 def _ema_stack_state(closes, spans=(8, 21, 34)):
     """closes = tf-minute bar closes oldest->newest. 'BULL' if
     ema(spans[0]) > ema(spans[1]) > ... (fast above slow), 'BEAR' if the mirror,
@@ -227,9 +252,14 @@ class FlowExecutionEngine:
         # processed_ticks is a set for O(1) membership + a parallel deque that
         # holds insertion order, so trimming drops the OLDEST ids (a bare
         # set()[-250:] keeps an arbitrary 250 and lets old ticks be re-counted).
-        self.cumulative_flow = {ticker: 0.0 for ticker in WATCHLIST.keys()}
-        self.processed_ticks = {ticker: set() for ticker in WATCHLIST.keys()}
-        self.processed_tick_order = {ticker: deque() for ticker in WATCHLIST.keys()}
+        # Keyed by tracked_tickers(), not WATCHLIST: live_state's VWAP thread
+        # and the viewer both take their ticker list from these keys.
+        self.cumulative_flow = {ticker: 0.0 for ticker in tracked_tickers()}
+        self.processed_ticks = {ticker: set() for ticker in tracked_tickers()}
+        self.processed_tick_order = {ticker: deque() for ticker in tracked_tickers()}
+        # REST ledger: {ticker: {tape_time: net_premium}}. See _ingest_flow.
+        self.rest_minute_vals = {ticker: {} for ticker in tracked_tickers()}
+        self._flow_epoch_seen = {}
 
         # Capital allocator (CRO gate). Armed from live account data in run_brain().
         self.allocator = None
@@ -802,9 +832,13 @@ class FlowExecutionEngine:
             self.cumulative_flow[t] = 0.0
             self.processed_ticks[t] = set()
             self.processed_tick_order[t] = deque()
+        # yesterday's REST hand-overs do not carry into today
+        if hasattr(self.uw, "reset_session"):
+            self.uw.reset_session()
         for t in tickers:
+            self.rest_minute_vals[t] = {}
             try:
-                self.cumulative_flow[t] = self.uw.seed_daily_cumulative_flow(t)
+                self._seed_flow(t)
             except Exception as e:
                 print(f"  ⚠️ re-seed {t} failed: {e}")
         self._poll_daily_gex(tickers)
@@ -1199,6 +1233,71 @@ class FlowExecutionEngine:
                 is_closing=True, order_type="LIMIT", limit_price=px,
             )
         print("  ✅ Startup reconcile complete.\n")
+
+    def _ingest_flow(self, ticker: str, flow_ticks) -> float:
+        """Fold one batch of flow ticks into cumulative_flow[ticker]; return it.
+
+        🚨 REST AND WEBSOCKET TICKS ARE COUNTED DIFFERENTLY, ON PURPOSE.
+        REST net-prem-ticks returns the WHOLE DAY on every poll, one row per
+        minute. It used to go through the same id-set as the socket, keyed on
+        f"{time}_{value}", which failed three ways once REST became the only
+        source (UW Basic, 2026-09-27):
+          1. the startup seed summed the day but marked nothing counted, so the
+             first poll added the whole day AGAIN -- any mid-day restart doubled
+             the day's flow so far;
+          2. a minute still in progress, if its value updates between polls,
+             gets a new id each time and is added once per value;
+          3. the id set forgets its oldest entries past 500, after which the
+             next full-day poll re-adds the forgotten ticks.
+        So REST is kept as a per-MINUTE ledger: a new minute adds its value, a
+        changed minute adds only the change. Idempotent under full-day re-polls
+        and exact whether or not in-progress minutes move.
+
+        A source hand-over (the socket went quiet; see
+        UnusualWhalesClient.get_live_net_premium) bumps the client's
+        flow_epoch. On seeing a new epoch the day is rebuilt from zero out of
+        the REST response, which covers the whole day -- so ticks printed while
+        the socket was down are recovered instead of lost.
+        """
+        epoch = getattr(self.uw, "flow_epoch", {}).get(ticker, 0)
+        if epoch != self._flow_epoch_seen.get(ticker, 0):
+            self._flow_epoch_seen[ticker] = epoch
+            self.cumulative_flow[ticker] = 0.0
+            self.rest_minute_vals[ticker] = {}
+            self.processed_ticks[ticker] = set()
+            self.processed_tick_order[ticker] = deque()
+            print(f"  🔁 [FLOW] {ticker}: source hand-over -- rebuilding today's "
+                  f"cumulative flow from REST.")
+
+        if self.uw.flow_source(ticker) == "rest":
+            ledger = self.rest_minute_vals.setdefault(ticker, {})
+            for tick in flow_ticks:
+                key = tick.get("time")
+                if not key:
+                    continue
+                v = float(tick.get("net_premium", 0) or 0)
+                old = ledger.get(key)
+                if old is None:
+                    self.cumulative_flow[ticker] += v
+                elif v != old:
+                    self.cumulative_flow[ticker] += v - old
+                ledger[key] = v
+        else:
+            for tick in flow_ticks:
+                tick_id = f"{tick.get('time')}_{tick.get('net_premium')}"
+                if tick_id not in self.processed_ticks[ticker]:
+                    self.cumulative_flow[ticker] += float(tick.get("net_premium", 0))
+                    self._mark_tick_processed(ticker, tick_id)
+        return self.cumulative_flow[ticker]
+
+    def _seed_flow(self, ticker: str) -> float:
+        """Seed today's cumulative flow from REST AND record which minutes that
+        covered, so the first REST poll does not count them again."""
+        total = self.uw.seed_daily_cumulative_flow(ticker)
+        self.cumulative_flow[ticker] = total
+        self.rest_minute_vals[ticker] = dict(
+            getattr(self.uw, "seed_minutes", {}).get(ticker, {}))
+        return total
 
     def _mark_tick_processed(self, ticker: str, tick_id: str):
         """Record a tick id, evicting the oldest once we exceed the cap."""
@@ -1631,18 +1730,10 @@ class FlowExecutionEngine:
                                 "open": _open, "status": _status, "flow": _flow})
 
     def run_brain(self):
-        tickers_to_track = list(WATCHLIST.keys())
-        if USE_RULES:
-            for r in RULES:
-                if r.get("enabled", True) and r["ticker"] not in tickers_to_track:
-                    tickers_to_track.append(r["ticker"])
-            # per-ticker flow state for any rule-only ticker
-            for t in tickers_to_track:
-                self.cumulative_flow.setdefault(t, 0.0)
-                self.processed_ticks.setdefault(t, set())
-                self.processed_tick_order.setdefault(t, deque())
-        
-        print("🌊 Igniting Unusual Whales Advanced WebSocket Multiplexer...")
+        tickers_to_track = tracked_tickers()
+        print(f"🎯 Tracking {len(tickers_to_track)} ticker(s): {', '.join(tickers_to_track)}")
+
+        print("🌊 Starting Unusual Whales flow feed (WebSocket if the plan allows, else REST)...")
         self.uw.start_multiplexer(tickers_to_track)
         
         print("🔌 Igniting Webull MQTT Engine...")
@@ -1651,9 +1742,9 @@ class FlowExecutionEngine:
         # --- SEED DAILY CUMULATIVE FLOW FOR MID-DAY STARTS ---
         print("\n🌱 Seeding Mid-Day Cumulative Flow (REST API Fallback)...")
         for ticker in tickers_to_track:
-            seeded_total = self.uw.seed_daily_cumulative_flow(ticker)
-            self.cumulative_flow[ticker] = seeded_total
-            print(f"  ├─ {ticker}: Seeded ${seeded_total:,.0f} in historical flow.")
+            seeded_total = self._seed_flow(ticker)
+            print(f"  ├─ {ticker}: Seeded ${seeded_total:,.0f} in historical flow "
+                  f"({len(self.rest_minute_vals.get(ticker, {}))} minutes).")
         self.session_date = market_now().date()
         self._poll_daily_gex(tickers_to_track)
         self._poll_session_regimes(tickers_to_track)
@@ -1933,15 +2024,8 @@ class FlowExecutionEngine:
                     flow_ticks = self.uw.get_live_net_premium(ticker)
                     if not flow_ticks: continue
 
-                    # --- CUMULATIVE AGGREGATION LOGIC ---
-                    for tick in flow_ticks:
-                        tick_id = f"{tick.get('time')}_{tick.get('net_premium')}"
-
-                        if tick_id not in self.processed_ticks[ticker]:
-                            self.cumulative_flow[ticker] += float(tick.get("net_premium", 0))
-                            self._mark_tick_processed(ticker, tick_id)
-
-                    latest_cumulative_flow = self.cumulative_flow[ticker]
+                    # --- CUMULATIVE AGGREGATION (see _ingest_flow) ---
+                    latest_cumulative_flow = self._ingest_flow(ticker, flow_ticks)
 
                     flow_momentum = self.flow_tracker.update_and_check(ticker, latest_cumulative_flow)
                     if flow_momentum not in ("LONG", "SHORT"): continue

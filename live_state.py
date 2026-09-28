@@ -48,6 +48,13 @@ import tempfile
 import time
 from zoneinfo import ZoneInfo
 
+# Every UW poller in this file pauses outside 09:25-16:05 ET on trading days.
+# UW's Basic plan allows 40,000 requests/day; these three threads plus the main
+# loop measured ~84/min around the clock on 2026-09-27. See uw_market_open.
+from unusual_whales_client import uw_market_open
+
+CLOSED_SLEEP = 60.0   # seconds between "is the market open yet?" checks
+
 _NY = ZoneInfo("America/New_York")
 
 
@@ -199,6 +206,9 @@ def _vwap_loop(eng):
     everything -- this thread must never be able to affect trading.
     """
     while True:
+        if not uw_market_open():
+            time.sleep(CLOSED_SLEEP)
+            continue
         try:
             names = sorted(set(getattr(eng, "cumulative_flow", {}) or {}))
             for tk in names:
@@ -437,6 +447,9 @@ def _gex_loop(eng):
     """Daemon. Seven UW calls per ticker per pass, so it runs slowly and
     staggered -- and like the VWAP thread it can never reach the trading loop."""
     while True:
+        if not uw_market_open():
+            time.sleep(CLOSED_SLEEP)
+            continue
         try:
             names = sorted({r["ticker"] for r in _rules()})
             for tk in names:
@@ -598,6 +611,9 @@ def _sweep_loop(eng):
     level. It is plotted on its own scale for that reason.
     """
     while True:
+        if not uw_market_open():
+            time.sleep(CLOSED_SLEEP)
+            continue
         try:
             names = sorted({r["ticker"] for r in _rules()})
             today = _dt.datetime.now(_NY).date().isoformat()

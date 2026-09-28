@@ -9,6 +9,83 @@ from collections import deque
 from dotenv import load_dotenv
 
 
+_NY_TZ = None
+
+
+def _now_et():
+    global _NY_TZ
+    if _NY_TZ is None:
+        from zoneinfo import ZoneInfo
+        _NY_TZ = ZoneInfo("America/New_York")
+    return datetime.now(_NY_TZ)
+
+
+def today_et() -> str:
+    return _now_et().date().isoformat()
+
+
+# =====================================================================
+# 🚨 MARKET-HOURS GATE FOR EVERY UW POLLER -- THE BASIC PLAN'S 40,000/DAY
+# =====================================================================
+# Measured 2026-09-27 on a Sunday: ~84 requests/min with the market CLOSED.
+# Nothing polled against a clock -- the main loop's net-prem-ticks every 15s
+# per ticker and live_state's VWAP, GEX and sweep threads all ran 24/7. That is
+# ~121k/day against a 40k limit, i.e. the quota was gone by early evening and
+# the NEXT session would open with it spent. Every poller now asks this first.
+# The bot itself stays up (EOD flatten, reconcile, Telegram, viewer): only the
+# UW calls pause.
+UW_OPEN_MOD = 9 * 60 + 25       # 09:25 ET: seed + warm-up before the bell
+UW_CLOSE_MOD = 16 * 60 + 5      # 16:05 ET: the 0DTE tape prints to ~16:15, but
+                                # nothing after 16:00 feeds a decision
+_HOLIDAYS = {}
+
+
+def _is_holiday(d) -> bool:
+    """NYSE full-day closures, from the lake tool's calendar. If that import
+    fails the gate degrades to weekdays-only -- loudly, once -- which costs one
+    wasted session of requests a few times a year, not a missed trading day."""
+    if d.year not in _HOLIDAYS:
+        try:
+            from uw_options_data_lake import market_holidays
+            _HOLIDAYS[d.year] = set(market_holidays(d.year))
+        except Exception as e:
+            print(f"⚠️ [UW] holiday calendar unavailable ({e}); gating on weekdays only")
+            _HOLIDAYS[d.year] = set()
+    return d in _HOLIDAYS[d.year]
+
+
+def uw_market_open(now=None) -> bool:
+    """True while UW polling is worth a request: a trading weekday between
+    09:25 and 16:05 ET."""
+    now = now or _now_et()
+    if now.weekday() >= 5 or _is_holiday(now.date()):
+        return False
+    mod = now.hour * 60 + now.minute
+    return UW_OPEN_MOD <= mod < UW_CLOSE_MOD
+
+
+def _tick_is_today(tick: dict, today: str) -> bool:
+    """🚨 net-prem-ticks WITHOUT a date returns the most recent COMPLETED
+    session -- so before today's first print (at the midnight rollover, or the
+    old 09:28 cron start) it returns YESTERDAY'S full day. The seed summed it
+    and every live day started from yesterday's total: measured 2026-09-27 on
+    54 ticker-days, the first live crossover each morning equalled |previous
+    day's total| (median ratio 1.001). Asking for date=<today> before the open
+    is no fix -- UW answers 422. So filter on each tick's own `date`."""
+    d = tick.get("date")
+    if d:
+        return str(d)[:10] == today
+    tt = tick.get("tape_time") or ""
+    if not tt:
+        return False
+    try:
+        from zoneinfo import ZoneInfo
+        ts = datetime.fromisoformat(str(tt).replace("Z", "+00:00"))
+        return ts.astimezone(ZoneInfo("America/New_York")).date().isoformat() == today
+    except ValueError:
+        return False
+
+
 def _net_gex_from_row(row: dict):
     """Pull a signed net-GEX number out of a UW row, tolerating the several
     field-naming schemes UW uses across endpoints/versions."""
@@ -47,6 +124,36 @@ class UnusualWhalesClient:
         self.ws = None
         self.is_connected = False
 
+        # ==========================================
+        # WEBSOCKET vs REST -- WHICH SOURCE FEEDS THE FLOW TRIGGER
+        # ==========================================
+        # 🚨 THE WEBSOCKET IS OPTIONAL, AND ITS ABSENCE IS NOT AN ERROR.
+        # UW's Basic plan has no websocket. The trigger's input already had a
+        # REST fallback (net-prem-ticks), so the bot runs fine without it --
+        # arguably BETTER, since every backtest behind the deployed rules was
+        # built from REST net-prem-ticks history. What was wrong is that a
+        # refused socket retried every 2s all session, forever.
+        #   UW_WEBSOCKET=false   never open it
+        #   a 401/403 handshake  stop retrying after one clear message
+        self.ws_enabled = os.getenv("UW_WEBSOCKET", "true").strip().lower() not in (
+            "false", "0", "no", "off")
+        self.ws_refused = False
+        self._ws_last_msg = 0.0          # wall time of the last message of ANY kind
+
+        # 🚨 A DEAD SOCKET MUST NOT FREEZE THE FLOW. get_live_net_premium used to
+        # fall back to REST only when the socket buffer was EMPTY -- but after a
+        # drop the buffer keeps its last 20 ticks forever, so the bot kept
+        # re-reading ticks it had already counted and every tick printed while
+        # the socket was down was lost for the rest of the day, silently. Now:
+        # a socket quiet for WS_STALE_S hands that ticker to REST for the rest
+        # of the session, and bumps flow_epoch so bot_runner rebuilds the day's
+        # total from REST instead of carrying the gap.
+        self.WS_STALE_S = 30.0
+        self._flow_source = {}           # ticker -> "ws" | "rest"
+        self._rest_sticky = {}           # ticker -> True once handed to REST
+        self.flow_epoch = {}             # ticker -> int, bumped on every hand-over
+        self.seed_minutes = {}           # ticker -> {tape_time: net_premium} from the seed
+
         # --- Intraday GEX recorder (Stage 1: gather data to decide later whether
         #     the strategy needs intraday regime awareness). Throttled writes. ---
         self.gex_log_path = os.getenv("GEX_LOG_PATH", "gex_history_log.jsonl")
@@ -54,15 +161,24 @@ class UnusualWhalesClient:
 
     def start_multiplexer(self, tickers: list):
         """
-        Connects to the Advanced Plan WebSocket and subscribes to all 5 
+        Connects to the Advanced Plan WebSocket and subscribes to all 5
         institutional data channels simultaneously.
+
+        Returns without opening anything when UW_WEBSOCKET=false. The flow
+        trigger then runs on REST net-prem-ticks, which is the same source the
+        backtests were built on.
         """
+        if not self.ws_enabled:
+            print("🌊 [UW] WebSocket DISABLED (UW_WEBSOCKET=false) -- flow runs on "
+                  "REST net-prem-ticks, polled every 15s per ticker.")
+            return
         def safe_float(val):
             if val is None or val == "": return 0.0
             try: return float(val)
             except (ValueError, TypeError): return 0.0
 
         def on_message(ws, message):
+            self._ws_last_msg = time.time()
             try:
                 payload = json.loads(message)
                 
@@ -178,18 +294,47 @@ class UnusualWhalesClient:
                     
             print(f"📡 [UW MULTIPLEXER] Now streaming 5 Dimensions of data for {len(tickers)} assets.")
 
+        def on_error(ws, e):
+            code = getattr(e, "status_code", None)
+            text = str(e)
+            if code in (401, 403) or " 401" in text or " 403" in text:
+                # The plan does not include the socket (or the key is bad).
+                # Retrying cannot fix either, so say it once and stop.
+                self.ws_refused = True
+            print(f"⚠️ [UW WS Error] {text[:160]}")
+
+        def on_close(ws, c, m):
+            self.is_connected = False
+            print("🔴 [UW WS] Disconnected.")
+
         def run_ws():
             url = f"wss://api.unusualwhales.com/socket?token={self.api_key}"
             self.ws = websocket.WebSocketApp(
                 url,
                 on_open=on_open,
                 on_message=on_message,
-                on_error=lambda ws, e: print(f"⚠️ [UW WS Error] {e}"),
-                on_close=lambda ws, c, m: print("🔴 [UW WS] Disconnected.")
+                on_error=on_error,
+                on_close=on_close,
             )
-            while True:
+            # Reconnect with backoff 2s -> 60s. A connection that closes before
+            # delivering a single message counts as a quick failure; three in a
+            # row is a socket this plan will not serve, which some servers
+            # signal by closing rather than by a 401/403.
+            delay, quick_fails = 2.0, 0
+            while not self.ws_refused:
+                before = self._ws_last_msg
                 self.ws.run_forever()
-                time.sleep(2) # Auto-reconnect
+                if self.ws_refused:
+                    break
+                quick_fails = quick_fails + 1 if self._ws_last_msg == before else 0
+                if quick_fails >= 3:
+                    self.ws_refused = True
+                    break
+                time.sleep(delay)
+                delay = min(delay * 2, 60.0) if quick_fails else 2.0
+            print("🌊 [UW] WebSocket unavailable on this plan/key -- flow runs on "
+                  "REST net-prem-ticks for the rest of the session. Set "
+                  "UW_WEBSOCKET=false to skip the attempt entirely.")
 
         t = threading.Thread(target=run_ws, daemon=True)
         t.start()
@@ -204,6 +349,9 @@ class UnusualWhalesClient:
         to perfectly seed the bot's cumulative total if started mid-day.
         """
         url = f"{self.base_url}/api/stock/{ticker.upper()}/net-prem-ticks"
+        # cleared FIRST, so a failed fetch leaves no minutes behind rather than
+        # yesterday's -- which the ledger would then treat as already counted
+        self.seed_minutes[ticker] = {}
         try:
             response = requests.get(url, headers=self.headers, timeout=5)
             if response.status_code == 200:
@@ -214,11 +362,27 @@ class UnusualWhalesClient:
                 # net-prem-ticks returns PER-MINUTE INCREMENTS (verified 2026-08-28
                 # against live SPY data: one-minute values oscillate around zero and
                 # spike/revert, so the day's cumulative net premium == sum of ticks).
+                # 🚨 RECORD WHICH MINUTES THE SEED COUNTED. It used to return only
+                # the total, so on REST the first poll -- which returns the SAME
+                # full day -- added every one of those minutes a second time.
+                # Any mid-day restart (systemd restarts on a crash) doubled the
+                # day's flow so far. bot_runner copies these into its
+                # per-minute ledger so the first poll adds only what is new.
                 total_cumulative = 0.0
+                minutes = {}
+                today = today_et()
+                dropped = sum(1 for t in data if not _tick_is_today(t, today))
+                data = [t for t in data if _tick_is_today(t, today)]
+                if dropped:
+                    print(f"  ├─ {ticker}: ignored {dropped} tick(s) from a previous "
+                          f"session (UW returns the last completed day before the open)")
                 for tick in data:
                     net_call = float(tick.get("net_call_premium", 0))
                     net_put = float(tick.get("net_put_premium", 0))
                     total_cumulative += (net_call - net_put)
+                    if tick.get("tape_time"):
+                        minutes[tick["tape_time"]] = net_call - net_put
+                self.seed_minutes[ticker] = minutes
 
                 # Soft sanity check: a single name's full-day net premium rarely
                 # clears ~$500M. If it does, the feed schema may have changed to
@@ -233,10 +397,55 @@ class UnusualWhalesClient:
             pass
         return 0.0
 
+    def ws_alive(self) -> bool:
+        """Socket open and heard from within WS_STALE_S. Any channel counts:
+        off_lit_trades and option_trades are busy enough that 30s of silence on
+        the whole socket means it is gone, not that the market is quiet."""
+        return (self.ws_enabled and not self.ws_refused and self.is_connected
+                and time.time() - self._ws_last_msg < self.WS_STALE_S)
+
+    def flow_source(self, ticker: str) -> str:
+        """'ws' or 'rest' -- which source served the LAST get_live_net_premium
+        call for this ticker. bot_runner counts the two differently."""
+        return self._flow_source.get(ticker, "rest")
+
+    def reset_session(self):
+        """New trading day: a ticker handed to REST yesterday may use the socket
+        again today. flow_epoch is NOT reset -- it only ever increases, so
+        bot_runner can never mistake an old hand-over for a new one."""
+        self._rest_sticky.clear()
+        self._flow_source.clear()
+        if hasattr(self, "_flow_rest_cache"):
+            self._flow_rest_cache.clear()
+
     def get_live_net_premium(self, ticker: str):
-        """Returns 0-latency flow, falls back to REST if WS hasn't caught it yet."""
-        if ticker in self.live_flow and len(self.live_flow[ticker]) > 0:
-            return list(self.live_flow[ticker])
+        """Flow ticks for one ticker: the socket buffer while it is live, REST
+        net-prem-ticks (the whole day so far) otherwise.
+
+        Once a ticker the socket WAS serving goes quiet, it is handed to REST
+        for the rest of the session and flow_epoch[ticker] is bumped. It does
+        not flip back mid-session: every flip between sources is a chance to
+        count a minute twice or not at all, and one clean hand-over plus a
+        rebuild from REST is exact.
+        """
+        if self.ws_enabled and not self._rest_sticky.get(ticker):
+            buf = self.live_flow.get(ticker)
+            if self.ws_alive() and buf:
+                self._flow_source[ticker] = "ws"
+                return list(buf)
+            if self._flow_source.get(ticker) == "ws":
+                self._rest_sticky[ticker] = True
+                self.flow_epoch[ticker] = self.flow_epoch.get(ticker, 0) + 1
+                print(f"🔁 [UW] {ticker}: WebSocket quiet >{self.WS_STALE_S:.0f}s -- "
+                      f"handing flow to REST for the rest of the session and "
+                      f"rebuilding today's total from it.")
+        self._flow_source[ticker] = "rest"
+
+        # Market closed: no request. The main loop runs every 0.1s around the
+        # clock, and this line is what stops it spending the day's quota on a
+        # Saturday. [] means "nothing new" to the caller, which is the truth.
+        if not uw_market_open():
+            return []
 
         # REST Fallback -- rate limited so a dead WS + 0.1s main loop doesn't
         # fire ~70 requests/sec across the watchlist.
@@ -254,8 +463,12 @@ class UnusualWhalesClient:
             if response.status_code == 200:
                 raw_data = response.json().get("data", [])
 
-                # Standardize the REST response to perfectly match our WebSocket format
+                # Standardize the REST response to perfectly match our WebSocket format.
+                # Today's ticks ONLY -- see _tick_is_today.
+                today = today_et()
                 for tick in raw_data:
+                    if not _tick_is_today(tick, today):
+                        continue
                     net_call = float(tick.get("net_call_premium", 0))
                     net_put = float(tick.get("net_put_premium", 0))
                     formatted_ticks.append({
