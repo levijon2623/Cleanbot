@@ -124,7 +124,10 @@ class WebullLiveTickBuilder:
         """Builds 2-minute candles dynamically from sub-second equity ticks."""
         if timestamp_seconds is None:
             timestamp_seconds = int(time.time())
-            
+        # wall-clock time of the last tick per ticker: lets a consumer tell a
+        # FROZEN price from a quiet one (manual_orders underlying TP/SL)
+        self.__dict__.setdefault("last_tick_at", {})[ticker] = time.time()
+
         minute_bucket = (timestamp_seconds // 120) * 120
         
         if ticker not in self.live_bars:

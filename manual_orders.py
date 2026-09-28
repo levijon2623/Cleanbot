@@ -180,6 +180,19 @@ EXIT_CHASE_S = 10.0
 # That is exactly what happened 2026-09-28 13:20:23: the escalation was
 # rejected, the rejection was logged as "sent", and a live IWM 0DTE sat with
 # NO working exit for four minutes until it was closed from the phone.
+# ---- underlying TP/SL (operator design, 2026-09-28) ----------------------
+# A manual hold can carry a take-profit and/or stop-loss on the UNDERLYING's
+# price, set by T/S + click on the viewer chart, on a live hold or on a staged
+# order (attached when it fills). Webull cannot trigger an option order off
+# another instrument's price (its only linked type, OTO, triggers on a FILL),
+# so the BOT watches: _check_levels, every loop pass, against its own live
+# spot. When spot has stayed at/through a level for UL_CONFIRM_S -- one bad
+# print cannot fire it -- the hold is closed through flatten(): marketable,
+# escalating to 911 on a stall, exactly like the Close button. Theta is left
+# to you; the 15:55 flatten still applies. Levels live on the hold record, so
+# they survive a restart -- but NOTHING watches them while the bot is down.
+UL_CONFIRM_S = 2.0             # spot must hold through the level this long
+UL_STALE_S = 30.0              # no underlying tick for this long -> say "blind"
 EXIT_REPLACE_WAIT_S = 6.0      # cancel unconfirmed this long -> send it again
 EXIT_RETRY_S = 1.0             # a rejected exit is re-sent after this
 EXIT_RETRY_MAX = 5             # sends in total, then it is on you
@@ -584,6 +597,10 @@ def _execute(eng, req, path, now_mod=None):
         ok = flatten(eng, tk, "viewer close", mode)
         return _result(path, ok, f"{tk} close sent ({mode})" if ok
                        else f"{tk} close FAILED — position still open")
+    if act == "levels":
+        # underlying TP/SL: exit-side, so like `close` it is not gated on ARMED
+        ok, msg = set_levels(eng, tk, req)
+        return _result(path, ok, msg)
     if not MANUAL_TRADING_ARMED:
         return _result(path, False, "MANUAL_TRADING_ARMED is False — not sent")
     if arm_left(eng) <= 0:
@@ -627,6 +644,17 @@ def _execute(eng, req, path, now_mod=None):
         return _result(path, False,
                        f"premium ${prem:,.0f} over the ${cap:,.0f} cap "
                        f"({basis})")
+    # Underlying TP/SL STAGED with the order: checked now, BEFORE anything is
+    # sent -- you asked for protection, so an order whose protection is
+    # nonsensical is refused rather than sent naked.
+    try:
+        ul_tp, ul_sl = _num_or_none(req.get("ul_tp")), _num_or_none(req.get("ul_sl"))
+    except (TypeError, ValueError):
+        return _result(path, False, "underlying TP/SL must be prices")
+    if ul_tp is not None or ul_sl is not None:
+        why = validate_levels(_right(oid), _spot(eng, tk)[0], ul_tp, ul_sl)
+        if why:
+            return _result(path, False, f"not sent — underlying levels: {why}")
 
     # 🚨 ARMED MEANS REAL. DRY_RUN GOVERNS THE BOT, NOT YOUR HAND.
     # This used to send only when DRY_RUN was False, which meant the single
@@ -660,11 +688,14 @@ def _execute(eng, req, path, now_mod=None):
         trade_id=coid,          # the broker's own id links open to close
         opened=int(time.time()), dry=False,
         strike=req.get("strike"), expiry=req.get("expiry"),
-        right=req.get("right"), note=str(req.get("note", ""))[:200])
+        right=req.get("right"), note=str(req.get("note", ""))[:200],
+        ul_tp=ul_tp, ul_sl=ul_sl)       # watched once it fills (_check_levels)
     save_positions(eng)
+    lv = "".join([f" · TP {ul_tp:.2f}" if ul_tp is not None else "",
+                  f" · SL {ul_sl:.2f}" if ul_sl is not None else ""])
     return _result(path, True,
                    f"{tk} BUY {qty}x {oid} @ limit {limit:.2f} "
-                   f"(${prem:,.0f}) — SENT, awaiting fill",
+                   f"(${prem:,.0f}){lv} — SENT, awaiting fill",
                    dict(limit=limit, qty=qty, premium=prem, coid=coid))
 
 
@@ -905,6 +936,131 @@ def flatten(eng, tk, reason="MANUAL EOD", mode=EXIT_MARKETABLE):
     _event(True, f"{tk} exit sent: SELL {qty}x @ limit {px:.2f} "
                  f"({reason}, {mode})")
     return True
+
+
+def _right(pos_or_oid):
+    """'C' or 'P' from a hold (its `right`, else its OCC) or an OCC string."""
+    if isinstance(pos_or_oid, dict):
+        r = str(pos_or_oid.get("right") or "").upper()[:1]
+        if r in ("C", "P"):
+            return r
+        pos_or_oid = pos_or_oid.get("option_id") or ""
+    s = str(pos_or_oid)
+    return s[-9] if len(s) >= 9 and s[-9] in ("C", "P") else None
+
+
+def _spot(eng, tk):
+    """(price, seconds since the last underlying tick). Age None if unknown."""
+    try:
+        px = float(eng.get_spot_price(tk) or 0)
+    except Exception:                           # noqa: BLE001
+        px = 0.0
+    last = (getattr(eng.webull.tick_builder, "last_tick_at", None) or {}).get(tk)
+    return px, (time.time() - last) if last else None
+
+
+def _beyond(right, kind, spot, level):
+    """Is spot at/through `level`? A call profits UP, a put DOWN."""
+    up = (right == "C") == (kind == "tp")
+    return spot >= level if up else spot <= level
+
+
+def validate_levels(right, spot, tp=None, sl=None):
+    """None if the levels make sense for this option at this spot, else why not.
+    A level already on the wrong side of spot would fire the instant it is
+    set -- a slipped click, not a stop -- so it is refused."""
+    if right not in ("C", "P"):
+        return "cannot tell call from put for this contract"
+    if not spot or spot <= 0:
+        return "no live underlying price to check the levels against"
+    for kind, lv in (("tp", tp), ("sl", sl)):
+        if lv is None:
+            continue
+        if lv <= 0:
+            return f"{kind.upper()} must be a positive price"
+        if _beyond(right, kind, spot, lv):
+            side = "above" if (right == "C") == (kind == "tp") else "below"
+            return (f"{kind.upper()} {lv:.2f} must be {side} spot {spot:.2f} for a "
+                    f"{'call' if right == 'C' else 'put'}")
+    return None
+
+
+def _num_or_none(v):
+    if v is None or v == "":
+        return None
+    return round(float(v), 2)
+
+
+def set_levels(eng, tk, req):
+    """Viewer action `levels`: set / move / clear the underlying TP and SL on a
+    manual hold (pending or filled). Only the keys PRESENT in the request are
+    touched; a present key with null clears that level. Not gated on ARMED --
+    a stop only ever closes."""
+    pos = load_positions(eng).get(tk)
+    if not pos:
+        return False, f"no manual hold on {tk} to attach levels to"
+    if pos.get("exit_coid") or pos.get("exit_retry"):
+        return False, f"{tk} is already exiting — levels not changed"
+    try:
+        new = {k: _num_or_none(req[k]) for k in ("tp", "sl") if k in req}
+    except (TypeError, ValueError):
+        return False, "levels must be prices"
+    tp = new.get("tp", pos.get("ul_tp"))
+    sl = new.get("sl", pos.get("ul_sl"))
+    spot, _age = _spot(eng, tk)
+    why = validate_levels(_right(pos), spot,
+                          new.get("tp"), new.get("sl"))   # only what changed
+    if why:
+        return False, f"{tk}: {why}"
+    pos["ul_tp"], pos["ul_sl"] = tp, sl
+    for k in ("ul_tp_since", "ul_sl_since"):
+        pos.pop(k, None)
+    save_positions(eng)
+    msg = (f"{tk} underlying levels: TP {tp:.2f}" if tp is not None else f"{tk} underlying levels: TP —")
+    msg += f" · SL {sl:.2f}" if sl is not None else " · SL —"
+    return True, msg + f" (spot {spot:.2f})"
+
+
+def _check_levels(eng):
+    """Fire a hold's underlying TP/SL. Runs every loop pass; cheap, and only
+    writes the hold file when something actually changes."""
+    for tk, pos in list((getattr(eng, "manual_holds", None) or {}).items()):
+        tp, sl = pos.get("ul_tp"), pos.get("ul_sl")
+        if tp is None and sl is None:
+            continue
+        if (pos.get("pending") or pos.get("exit_coid") or pos.get("exit_retry")
+                or pos.get("cancel_sent")):
+            continue                            # not held yet, or already leaving
+        spot, age = _spot(eng, tk)
+        if spot <= 0 or (age is not None and age > UL_STALE_S):
+            if not pos.get("ul_blind"):
+                pos["ul_blind"] = True
+                save_positions(eng)
+                _event(False, f"{tk} underlying TP/SL BLIND — no live {tk} price"
+                              + (f" for {age:.0f}s" if age else "")
+                              + "; levels are NOT being watched")
+            continue
+        if pos.pop("ul_blind", None):
+            save_positions(eng)
+            _event(True, f"{tk} underlying price back — TP/SL watching again")
+        right = _right(pos)
+        now = time.time()
+        for kind, lv in (("tp", tp), ("sl", sl)):
+            if lv is None:
+                continue
+            key = f"ul_{kind}_since"
+            if not _beyond(right, kind, spot, lv):
+                pos.pop(key, None)
+                continue
+            since = pos.setdefault(key, now)
+            if now - since < UL_CONFIRM_S:
+                continue
+            reason = (f"UNDERLYING {kind.upper()} {lv:.2f} "
+                      f"(spot {spot:.2f}, held {now - since:.1f}s)")
+            _event(True, f"{tk} {reason} — closing, marketable then 911")
+            pos.pop(key, None)
+            flatten(eng, tk, reason, EXIT_MARKETABLE)
+            break
 
 
 def _poll_due(pos, key):
@@ -1236,6 +1392,7 @@ def poll(eng, now_mod=None):
         # stops it re-firing on something already sold.
         _check_entries(eng)
         _check_exits(eng)
+        _check_levels(eng)
         # EOD FLATTEN -- it must run even if a request is malformed, and even
         # after entries have closed for the day. It goes out MARKETABLE and
         # `_check_exits` escalates to 911 pricing if it has not filled in 20s,

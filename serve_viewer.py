@@ -115,8 +115,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self._json({"ok": False, "err": "bad size"}, 413)
             req = json.loads(self.rfile.read(n).decode("utf-8"))
             act = str(req.get("action") or "buy").lower()
-            if act not in ("buy", "close", "panic", "arm", "disarm"):
+            if act not in ("buy", "close", "panic", "arm", "disarm", "levels"):
                 return self._json({"ok": False, "err": "action"}, 400)
+            # underlying TP/SL prices: numbers or null, nothing else
+            for k in ("tp", "sl", "ul_tp", "ul_sl"):
+                if req.get(k) is not None and not isinstance(req[k], (int, float)):
+                    return self._json({"ok": False, "err": f"{k} must be a number"}, 400)
             # 911 and arm/disarm are account-wide: no ticker to validate
             if act not in ("panic", "arm", "disarm") and str(
                     req.get("ticker", "")).upper() not in (

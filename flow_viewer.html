@@ -146,6 +146,22 @@
   .row .p.pos{color:var(--up)} .row .p.neg{color:var(--dn)}
   .row .p.flat{color:var(--fail)}
   #main{flex:1;display:flex;flex-direction:column;min-width:0}
+  /* underlying TP/SL */
+  .ulbox{border:1px solid var(--line);border-radius:6px;padding:7px 9px;margin:8px 0;
+    font-size:11px}
+  .ulbox label.chk{display:flex;align-items:center;gap:6px;color:var(--fg);cursor:pointer}
+  .ulbox label.chk input{width:auto}
+  .ulrow{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;color:var(--dim)}
+  .ulrow b.tp{color:#56d364} .ulrow b.sl{color:#ff6b6b}
+  .ulrow .x{cursor:pointer;color:var(--dim);padding:0 3px;border:1px solid var(--line);
+    border-radius:4px;margin-left:3px}
+  .ulrow .x:hover{color:var(--fg);border-color:var(--accent)}
+  #ulHold{padding:0 12px}
+  #ulToast{position:fixed;left:50%;top:52px;transform:translateX(-50%);z-index:80;
+    background:#0b0f14ee;border:1px solid var(--line);border-radius:6px;padding:6px 12px;
+    font-size:12px;display:none;max-width:70vw}
+  #ulToast.bad{border-color:var(--dn);color:#ff9e99}
+  #ulToast.good{border-color:var(--up);color:#7ee787}
   #bar{padding:9px 14px;border-bottom:1px solid var(--line);display:flex;
     gap:16px;align-items:center;flex-wrap:wrap;background:var(--panel)}
   #bar .k{color:var(--dim)} #bar b{font-weight:600}
@@ -211,6 +227,7 @@
     <div id="telem">
       <h2><span>guard telemetry</span><span id="telemN"></span></h2>
       <div id="hold"></div>
+      <div id="ulHold"></div>
       <div id="exitbar">
         <button id="xMkt" disabled>SELECT A MANUAL POSITION</button>
         <button id="x911">911</button>
@@ -237,6 +254,11 @@
       </div>
       <div class="kv"><span>max premium (qty × ask × 100)</span></div>
       <div id="prem">—</div>
+      <div class="ulbox">
+        <label class="chk"><input type="checkbox" class="ulOn"> Enable underlying
+          TP/SL <span class="d">— hold T or S, click the price chart</span></label>
+        <div class="ulrow" id="ulStaged"></div>
+      </div>
       <button id="armBtn" style="margin-bottom:8px">ARM</button>
       <input id="ordNote" placeholder="note (optional, stored with the fill)">
       <button class="bigbtn call" id="buyC" disabled>BUY CALL</button>
@@ -250,6 +272,7 @@
     <div id="bar"><span class="k">loading…</span></div>
     <div id="chart"><div id="empty">loading <code>tape/index.json</code>…</div></div>
     <div id="legend"></div>
+    <div id="ulToast"></div>
     <div id="keyHint" title="show the chart key">k · key</div>
   </div>
   <div id="noteWrap"><div id="note">
@@ -543,7 +566,8 @@ function liveDraw(d, s){
       color:'#ff7b72', lineWidth:2, priceScaleId:'sweep',
       priceFormat:{type:'volume'}, title:'sweeps only',
     }, 1);
-    liveSeries = {px, vw, vol, cum, ema, swp, lines:[], gexLines:[]};
+    liveSeries = {px, vw, vol, cum, ema, swp, lines:[], gexLines:[], ulLines:[]};
+    chart.subscribeClick(ulClick);
   }
   /* Closed minutes PLUS the forming one. Without the forming point the line
      trailed the market by up to a minute while the `underlying` readout
@@ -615,6 +639,7 @@ function liveDraw(d, s){
     }
   }
 
+  drawUl();
   for(const l of liveSeries.lines) liveSeries.cum.removePriceLine(l);
   liveSeries.lines = [];
   if(s.thr) for(const sg of [1,-1])
@@ -687,6 +712,8 @@ function liveDraw(d, s){
       (s.sweep||[]).length ? ` (${s.sweep.length} min, own scale)`
                            : ' — waiting for alerts'} · ISO, single-leg, opening</span>
     <span><i style="background:#d29922"></i>p${s.min_flow_pct??'?'} magnitude gate (live, moves)</span>
+    <span><i style="background:#56d364"></i>underlying TP · <i style="background:#ff6b6b"></i>SL
+      — T/S + click when enabled; dashed = staged with an order</span>
     ${s.state==='holding' ? `<span style="color:var(--put)">⚠ flow tracking is
       PAUSED while a position is open (bot_runner.py:1708 skips busy tickers) —
       the series is frozen, not quiet</span>` : ''}
@@ -827,10 +854,153 @@ function setQty(v){
   $('#qtyR').value = QTY; $('#qtyN').value = QTY;
 }
 
+/* ---- UNDERLYING TP/SL -------------------------------------------------
+   T + click sets a take-profit, S + click a stop-loss, at the clicked
+   UNDERLYING price -- on the manual hold for the ticker on screen, or, if
+   there is none, on the order you are staging (sent with it, active once it
+   fills). The BOT watches the levels (manual_orders._check_levels), not this
+   page: closing the browser does not switch a stop off. A level on the wrong
+   side of spot for the option's direction is refused here and again there.
+   Lines: bright green = TP, bright red = SL; dashed while only staged.      */
+let UL_ON = uiGet('fv_ul') === '1';
+let STAGE_UL = {tk:null, right:null, tp:null, sl:null};
+const UL_KEYS = new Set();
+let ulToastTimer = null;
+
+function holdRight(p){
+  const r = String(p.right || '').toUpperCase()[0];
+  if(r === 'C' || r === 'P') return r;
+  const o = String(p.option_id || '');
+  return o.length >= 9 ? o[o.length - 9] : null;
+}
+function ulWhy(right, spot, kind, px){
+  if(!(right === 'C' || right === 'P')) return 'cannot tell call from put';
+  if(!spot) return 'no live underlying price';
+  const up = (right === 'C') === (kind === 'tp');
+  if(up ? px <= spot : px >= spot)
+    return `${kind.toUpperCase()} ${px.toFixed(2)} must be ${up ? 'above' : 'below'} spot ${
+      spot.toFixed(2)} for a ${right === 'C' ? 'call' : 'put'}`;
+  return null;
+}
+function ulToast(msg, bad){
+  const t = $('#ulToast');
+  t.textContent = msg; t.className = bad ? 'bad' : 'good'; t.style.display = 'block';
+  clearTimeout(ulToastTimer);
+  ulToastTimer = setTimeout(() => { t.style.display = 'none'; }, 4500);
+}
+function setUlOn(v){
+  UL_ON = !!v; uiSet('fv_ul', UL_ON ? '1' : null);
+  document.querySelectorAll('.ulOn').forEach(el => { el.checked = UL_ON; });
+  renderUlStage(); renderUlHold(); drawUl();
+}
+function stagedUl(){
+  const c = SEL ? selContract() : null;
+  return (c && STAGE_UL.tk === SEL.tk && STAGE_UL.right === c.right) ? STAGE_UL : null;
+}
+function ulPct(px, spot){ return spot ? ` (${px >= spot ? '+' : ''}${((px/spot-1)*100).toFixed(2)}%)` : ''; }
+
+function renderUlStage(){
+  const el = $('#ulStaged'); if(!el) return;
+  document.querySelectorAll('.ulOn').forEach(x => { x.checked = UL_ON; });
+  const u = stagedUl();
+  if(!UL_ON){ el.innerHTML = ''; return; }
+  const spot = SEL && LIVE ? (LIVE.tickers[SEL.tk] || {}).spot : null;
+  const part = k => u && u[k] != null
+    ? `<span>${k.toUpperCase()} <b class="${k}">${u[k].toFixed(2)}</b>${ulPct(u[k], spot)}<span class="x" data-ulx="${k}">✕</span></span>`
+    : `<span>${k.toUpperCase()} —</span>`;
+  el.innerHTML = part('tp') + part('sl') +
+    `<span style="width:100%">staged — goes with the order, watched once it fills</span>`;
+  el.querySelectorAll('[data-ulx]').forEach(x => x.onclick = () => {
+    STAGE_UL[x.dataset.ulx] = null; renderUlStage(); drawUl(); });
+}
+
+function renderUlHold(){
+  const el = $('#ulHold'); if(!el || !LIVE) return;
+  const rows = [];
+  for(const [t, p] of Object.entries(LIVE.manual || {})){
+    if(p.ul_tp == null && p.ul_sl == null) continue;
+    const spot = (LIVE.tickers[t] || {}).spot;
+    const part = k => p['ul_' + k] != null
+      ? `<span>${k.toUpperCase()} <b class="${k}">${Number(p['ul_' + k]).toFixed(2)}</b>${
+          ulPct(Number(p['ul_' + k]), spot)}<span class="x" data-ult="${t}" data-ulk="${k}">✕</span></span>`
+      : `<span>${k.toUpperCase()} —</span>`;
+    rows.push(`<div class="ulrow"><span>${t} underlying</span>${part('tp')}${part('sl')}${
+      p.ul_blind ? '<b style="color:var(--dn)">BLIND — no live price</b>' : ''}${
+      p.pending ? '<span>(active once filled)</span>' : ''}</div>`);
+  }
+  el.innerHTML = rows.join('') + `<div class="ulrow"><label class="chk" style="display:flex;
+    gap:6px;align-items:center;cursor:pointer"><input type="checkbox" class="ulOn"
+    style="width:auto"> underlying TP/SL — T/S + click the chart</label></div>`;
+  el.querySelectorAll('.ulOn').forEach(x => { x.checked = UL_ON; x.onchange = () => setUlOn(x.checked); });
+  el.querySelectorAll('[data-ult]').forEach(x => x.onclick = async () => {
+    const j = await postOrder({action:'levels', ticker:x.dataset.ult, [x.dataset.ulk]: null});
+    ulToast(j.ok ? `clearing ${x.dataset.ult} ${x.dataset.ulk.toUpperCase()} — verdict in telemetry`
+                 : 'REFUSED: ' + (j.err || '?'), !j.ok);
+    pollEvents();
+  });
+}
+
+function drawUl(){
+  if(!liveSeries || !liveSeries.px) return;
+  for(const l of (liveSeries.ulLines || [])) liveSeries.px.removePriceLine(l);
+  liveSeries.ulLines = [];
+  if(!LIVE) return;
+  const spot = (LIVE.tickers[liveTk] || {}).spot;
+  const hold = (LIVE.manual || {})[liveTk];
+  let lv = null, staged = false;
+  if(hold && (hold.ul_tp != null || hold.ul_sl != null)) lv = {tp: hold.ul_tp, sl: hold.ul_sl};
+  else if(!hold && SEL && SEL.tk === liveTk && stagedUl()){ lv = stagedUl(); staged = true; }
+  if(!lv) return;
+  for(const [k, col] of [['tp', '#56d364'], ['sl', '#ff6b6b']]){
+    if(lv[k] == null) continue;
+    const px = Number(lv[k]);
+    liveSeries.ulLines.push(liveSeries.px.createPriceLine({
+      price: px, color: col, lineWidth: 3,
+      lineStyle: staged ? LWC.LineStyle.Dashed : LWC.LineStyle.Solid,
+      axisLabelVisible: true,
+      title: `${staged ? 'staged ' : ''}${k.toUpperCase()} ${px.toFixed(2)}${ulPct(px, spot)}`}));
+  }
+}
+
+async function ulClick(p){
+  if(!UL_ON || !LIVE || !liveSeries || !p || !p.point) return;
+  const kind = UL_KEYS.has('t') ? 'tp' : UL_KEYS.has('s') ? 'sl' : null;
+  if(!kind) return;
+  if(p.paneIndex != null && p.paneIndex !== 0)
+    return ulToast('click the PRICE pane (top), not the flow pane', true);
+  const raw = liveSeries.px.coordinateToPrice(p.point.y);
+  if(raw == null) return;
+  const px = Math.round(raw * 100) / 100, tk = liveTk;
+  const spot = (LIVE.tickers[tk] || {}).spot;
+  const hold = (LIVE.manual || {})[tk];
+  if(hold){
+    const why = ulWhy(holdRight(hold), spot, kind, px);
+    if(why) return ulToast(why, true);
+    const j = await postOrder({action:'levels', ticker:tk, [kind]: px});
+    ulToast(j.ok ? `${tk} ${kind.toUpperCase()} ${px.toFixed(2)} sent — the bot confirms in telemetry`
+                 : 'REFUSED: ' + (j.err || '?'), !j.ok);
+    pollEvents();
+    return;
+  }
+  const c = SEL && SEL.tk === tk ? selContract() : null;
+  if(c){
+    if(STAGE_UL.tk !== tk || STAGE_UL.right !== c.right)
+      STAGE_UL = {tk, right:c.right, tp:null, sl:null};
+    const why = ulWhy(c.right, spot, kind, px);
+    if(why) return ulToast(why, true);
+    STAGE_UL[kind] = px;
+    ulToast(`staged ${kind.toUpperCase()} ${px.toFixed(2)} — sent with the order`, false);
+    renderUlStage(); drawUl();
+    return;
+  }
+  ulToast(`no manual position or staged order on ${tk} — open the strike strip and stage one first`, true);
+}
+
 function renderStage(){
   const c = selContract();
   if(!SEL){ $('#stage').style.display = 'none'; return; }
   $('#stage').style.display = 'flex';
+  renderUlStage();
 
   /* 🚨 ARMED MEANS REAL. There is no "armed but pretend" state any more:
      MANUAL_TRADING_ARMED decides whether YOUR orders are real, DRY_RUN
@@ -964,6 +1134,8 @@ async function fire(right){
   const body = {ticker: SEL.tk, option_id: c.id, qty: qtyVal(),
     strike: c.strike, expiry: c.expiry, right: c.right,
     note: $('#ordNote').value.trim().slice(0, 200)};
+  const u = UL_ON ? stagedUl() : null;
+  if(u){ if(u.tp != null) body.ul_tp = u.tp; if(u.sl != null) body.ul_sl = u.sl; }
   $('#ordMsg').textContent = 'queuing…';
   try {
     const r = await fetch('/order', {method:'POST', headers:{
@@ -973,6 +1145,7 @@ async function fire(right){
     $('#ordMsg').textContent = j.ok
       ? `queued ${j.queued} — waiting on the bot's verdict (telemetry, below left)`
       : 'REFUSED by the server: ' + (j.err || '?');
+    if(j.ok && u) STAGE_UL = {tk:null, right:null, tp:null, sl:null};
   } catch(e){
     $('#ordMsg').textContent = 'post failed: ' + e.message +
       ' (serve_viewer.py, not a bare http.server?)';
@@ -1105,6 +1278,7 @@ function renderHold(){
     : sel && sel.pending ? `CANCEL ${HOLDSEL} ENTRY`
     : `CLOSE ${HOLDSEL} MARKETABLE`;
   $('#x911').disabled = !panicScope().length;
+  renderUlHold();
 }
 
 async function postOrder(body){
@@ -1257,6 +1431,7 @@ addEventListener('keydown', e => {
   if(e.key === 'Escape' && $('#legend').classList.contains('on')){
     e.preventDefault(); toggleKey(false); return; }
   if(e.key === 'Escape' && SEL){ e.preventDefault(); $('#stageX').click(); return; }
+  if(e.key === 't' || e.key === 's'){ UL_KEYS.add(e.key); return; }
   if(e.key === 'k'){ e.preventDefault(); toggleKey(); return; }
   if(e.key === 'n'){ e.preventDefault(); openNote(); return; }
   if(e.key === 'l'){ e.preventDefault(); $('#liveBtn').click(); return; }
@@ -1268,6 +1443,10 @@ addEventListener('keydown', e => {
   if(['j','ArrowDown'].includes(e.key)){ e.preventDefault(); step(1); }
   if(e.key === 'ArrowUp'){ e.preventDefault(); step(-1); }
 });
+
+addEventListener('keyup', e => { UL_KEYS.delete(e.key); });
+addEventListener('blur', () => UL_KEYS.clear());
+document.querySelectorAll('.ulOn').forEach(x => { x.checked = UL_ON; x.onchange = () => setUlOn(x.checked); });
 
 (async function init(){
   let r;
