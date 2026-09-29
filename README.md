@@ -153,6 +153,12 @@ exit — otherwise a flag you toggled at lunchtime could trap you in a trade.
 | `peer_guard.py` | refuses to start a second engine against one brokerage account |
 | `hl_gate.py`, `hyper_exposure_client.py` | Hyperliquid, locked (see above) |
 
+**Auditing the live bot** — `audit_trigger_day.py 2026-09-28` replays a
+session through the bot's own gate code: which rule triggers should have
+fired, which gate refused each of the rest, and (from the service journal)
+whether the bot was up with a basket at that minute. Most refusals are silent
+in the log; this is how to see them.
+
 **Research** — `sim_core.py` is the only simulator; every `check_*.py` should
 route through it. `SCRIPTS.md` indexes all of them, generated from their
 docstrings.
