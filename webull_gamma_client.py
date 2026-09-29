@@ -120,10 +120,49 @@ class WebullLiveTickBuilder:
         # Format: { "SPY260821C00500000": {"bid": 1.50, "ask": 1.52, "timestamp": 1234567.89} }
         self.live_option_quotes = {}
 
+    # 🚨 ONE BAD PRINT MUST NOT BECOME "THE PRICE". 2026-09-28 15:59 a single
+    # SPY tick parsed as 116.10 (spot ~765.5) -- the handler takes the first
+    # `price:` anywhere in the message -- and it went straight into live_bars,
+    # which is what get_spot_price, strike selection, the basket rebalancer
+    # and the manual underlying TP/SL all read. It also sat in the viewer's
+    # price history and flattened the SPY chart the next morning. A tick more
+    # than TICK_JUMP_PCT from the last accepted price is held back until
+    # TICK_JUMP_CONFIRM consecutive ticks agree on the new level (within
+    # 0.5%), so a real gap -- a halt, the overnight open -- is accepted about
+    # a second late instead of being locked out.
+    TICK_JUMP_PCT = 0.03
+    TICK_JUMP_CONFIRM = 3
+
+    def _tick_ok(self, ticker, price):
+        bar = self.live_bars.get(ticker)
+        last = bar["close"] if bar else None
+        pend = self.__dict__.setdefault("_tick_jump", {})
+        if price <= 0:
+            return False
+        if not last or abs(price / last - 1) <= self.TICK_JUMP_PCT:
+            pend.pop(ticker, None)
+            return True
+        p = pend.get(ticker)
+        n = p[1] + 1 if p and abs(price / p[0] - 1) <= 0.005 else 1
+        pend[ticker] = (price, n)
+        if n >= self.TICK_JUMP_CONFIRM:
+            pend.pop(ticker, None)
+            print(f"  ⚠️ [TICK] {ticker} jump to {price} from {last} confirmed "
+                  f"by {n} ticks — accepted")
+            return True
+        if n == 1:
+            print(f"  ⚠️ [TICK] {ticker} print {price} is "
+                  f"{(price / last - 1) * 100:+.1f}% from {last} — held back")
+        return False
+
     def process_equity_tick(self, ticker, price, timestamp_seconds=None):
         """Builds 2-minute candles dynamically from sub-second equity ticks."""
         if timestamp_seconds is None:
             timestamp_seconds = int(time.time())
+        # a rejected print is not a tick: it must not refresh last_tick_at
+        # either, or a stream of garbage would read as a live price
+        if not self._tick_ok(ticker, price):
+            return
         # wall-clock time of the last tick per ticker: lets a consumer tell a
         # FROZEN price from a quiet one (manual_orders underlying TP/SL)
         self.__dict__.setdefault("last_tick_at", {})[ticker] = time.time()
