@@ -94,6 +94,15 @@ is refused. (The account figure under the premium is blurred.)
 
 ![Underlying TP/SL staged with a SPY 0DTE call](docs/images/underlying-tpsl-staged.png)
 
+**Sideline.** Done for the day, as a switch rather than a resolution. Two
+clicks under GO LIVE disarm the desk and refuse every arm and entry until the
+next session; the bot holds it, so a reload, another tab or a restart cannot
+lift it. Exits still work. Coming back early means answering one question —
+Yes lifts it, No keeps it — and every answer is logged with a note, so the
+days you came back in can be looked at later.
+
+![Sidelined, and the question asked before trading again](docs/images/sideline.png)
+
 **Weekly GEX (`weekly_gex.html`).** The week's 0–4DTE gamma map: one column
 per trading day, each drawn from that day's expiry as snapshotted each
 morning, with walls and peak derived per expiry and the price line walking
