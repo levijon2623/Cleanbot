@@ -1297,12 +1297,13 @@ def snapshot(eng):
     # phone, a left-open tab must not stay armed, so the session arm expires
     # and the chart shows the countdown -- the banner has to reflect what
     # _execute will actually do, not what the config file says.
-    _cap, _armed, _left = False, False, 0.0
+    _cap, _armed, _left, _side = False, False, 0.0, None
     try:
         import manual_orders
         from config import MANUAL_TRADING_ARMED as _cap
         _armed = manual_orders.is_armed(eng)
         _left = manual_orders.arm_left(eng)
+        _side = manual_orders.sideline_state()
     except Exception:
         pass
 
@@ -1327,6 +1328,8 @@ def snapshot(eng):
         arm_secs_left=int(_left),        # 0 = window closed
         arm_window_s=int(getattr(__import__("manual_orders"),
                                  "ARM_WINDOW_S", 900)),
+        sidelined=bool(_side),            # done for the day (manual_orders)
+        sideline_at=(_side or {}).get("at"),
         manual=dict(getattr(eng, "manual_holds", {}) or {}),
         manual_cap=_num(manual_cap, 2),
         manual_cap_basis=cap_basis,

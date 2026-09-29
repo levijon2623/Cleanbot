@@ -50,6 +50,25 @@
     animation:pulse 2s ease-in-out infinite}
   @keyframes pulse{50%{opacity:.62}}
   #liveInfo{font-size:11px;color:var(--dim);text-align:center}
+  #sideBtn{color:var(--put);border-color:#5a4a1a}
+  #sideBtn.conf{background:#2a2411;border-color:var(--put);color:var(--put);
+    animation:pulse 1s ease-in-out infinite}
+  #sideBtn.out{background:#2a2411;border-color:var(--put);color:var(--put)}
+  #sideInfo{font-size:11px;color:var(--dim);text-align:center}
+  #sideWrap{position:fixed;inset:0;background:#000a;display:none;
+    align-items:center;justify-content:center;z-index:100}
+  #sideBox{background:var(--panel);border:1px solid var(--put);border-radius:10px;
+    padding:18px;width:440px;max-width:92vw}
+  #sideBox h2{margin:0 0 4px;font-size:13px;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--dim)}
+  #sideBox .q{font-size:17px;font-weight:700;line-height:1.35;margin:10px 0 12px}
+  #sideBox .ctx{font-size:11px;color:var(--dim);margin-bottom:10px;line-height:1.6}
+  #sideBox textarea{width:100%;height:70px;resize:vertical;margin-bottom:10px}
+  #sideBox .foot{display:flex;gap:8px;align-items:center}
+  #sideBox .foot .d{flex:1;font-size:11px}
+  #sideBox .foot button{width:auto;padding:8px 22px}
+  #sideNo{border-color:var(--up);color:var(--up)}
+  #sideYes{border-color:var(--dn);color:var(--dn)}
   #list{flex:1;overflow-y:auto;min-height:120px}
   /* ---- strike strip ---- */
   .tkrow{padding:6px 12px;border-bottom:1px solid #1c2128;cursor:pointer;
@@ -210,7 +229,9 @@
   <div id="side">
     <h1>Flow Viewer <a href="weekly_gex.html" style="float:right;color:var(--accent);text-decoration:none;text-transform:none;letter-spacing:0">weekly GEX →</a></h1>
     <div id="livebar"><button id="liveBtn">● GO LIVE</button>
-      <span id="liveInfo" class="d"></span></div>
+      <span id="liveInfo" class="d"></span>
+      <button id="sideBtn" disabled>⏸ SIDELINE</button>
+      <span id="sideInfo" class="d"></span></div>
     <div id="filters">
       <select id="fTicker"><option value="">all tickers</option></select>
       <select id="fHalf">
@@ -290,6 +311,17 @@
     <div class="foot">
       <span class="d" id="noteMsg">esc to cancel · ctrl+enter to save</span>
       <button id="noteSave" style="width:auto;padding:6px 16px">save</button>
+    </div>
+  </div></div>
+  <div id="sideWrap"><div id="sideBox">
+    <h2>You sidelined yourself</h2>
+    <div class="ctx" id="sideCtx"></div>
+    <div class="q">Are you trying to give back profits or increase losses?</div>
+    <textarea id="sideWhy" placeholder="what has changed since you sidelined? (optional — logged with your answer)"></textarea>
+    <div class="foot">
+      <span class="d" id="sideMsg">esc to cancel</span>
+      <button id="sideNo">No</button>
+      <button id="sideYes">Yes</button>
     </div>
   </div></div>
 </div>
@@ -503,6 +535,7 @@ function liveStop(){
   uiSet('fv_live', null);
   $('#liveBtn').classList.remove('on'); $('#liveBtn').textContent = '● GO LIVE';
   $('#liveInfo').textContent = '';
+  sideConf = false; renderSide();
   // the order desk is meaningless without a live engine behind it
   SEL = null; openTk = null; HOLDSEL = null; disarmFire(); disarmPanic();
   $('#stage').style.display = 'none'; $('#telem').style.display = 'none';
@@ -525,6 +558,7 @@ async function livePoll(){
   if(!tks.length){ $('#liveInfo').textContent += ' · no tickers yet'; return; }
   if(!liveTk || !tks.includes(liveTk)) liveTk = tks[0];
   liveList(d);
+  renderSide();
   renderStage();
   renderHold();
   liveDraw(d, d.tickers[liveTk]);
@@ -1069,8 +1103,10 @@ function renderStage(){
      arming would be refused by the engine anyway and a button that does
      nothing is worse than one that is visibly unavailable. */
   const ab = $('#armBtn');
-  ab.disabled = !capable;
+  const side = !!(LIVE && LIVE.sidelined);
+  ab.disabled = !capable || side;
   ab.textContent = !capable ? 'ARMING UNAVAILABLE (config)'
+    : side ? 'SIDELINED — until tomorrow'
     : armed ? `DISARM  (${Math.floor(left/60)}:${
         String(Math.floor(left%60)).padStart(2,'0')})`
     : `ARM FOR ${Math.round((LIVE.arm_window_s||900)/60)} MIN`;
@@ -1079,6 +1115,7 @@ function renderStage(){
 
   const why = [];
   if(!capable) why.push('MANUAL_TRADING_ARMED is False in config.py');
+  else if(side) why.push('SIDELINED until tomorrow — the SIDELINE button, top left, to come back');
   else if(!armed) why.push('the arming window is closed — press ARM');
   if(prem > capDollars)
     why.push(`premium over the $${capDollars.toLocaleString(undefined,
@@ -1281,6 +1318,72 @@ function renderHold(){
   renderUlHold();
 }
 
+/* ---- SIDELINE: done for the day ----
+   One click arms it, a second within 4s sends it. manual_orders then disarms
+   and refuses every arm and entry until tomorrow (ET) -- the ENGINE holds
+   it, in a file, so a reload, another tab or a restart cannot lift it.
+   Coming back early means answering the question in #sideWrap: YES lifts it,
+   NO keeps it, and every answer is logged. Exits are never affected. */
+let sideConf = false, sideTimer = null;
+
+function renderSide(){
+  const b = $('#sideBtn');
+  if(!LIVE){ b.disabled = true; b.className = ''; b.textContent = '⏸ SIDELINE';
+    $('#sideInfo').textContent = ''; return; }
+  b.disabled = false;
+  if(LIVE.sidelined){
+    b.className = 'out';
+    b.textContent = '⏸ SIDELINED — until tomorrow';
+    const t = LIVE.sideline_at ? new Date(LIVE.sideline_at*1000) : null;
+    $('#sideInfo').textContent = (t ? `since ${t.toLocaleTimeString([],
+      {hour:'2-digit', minute:'2-digit'})} · ` : '') + 'exits still work';
+    return;
+  }
+  b.className = sideConf ? 'conf' : '';
+  b.textContent = sideConf ? 'CONFIRM — SIDELINE UNTIL TOMORROW'
+                           : '⏸ SIDELINE';
+  $('#sideInfo').textContent = sideConf ? 'click again within 4s' : '';
+}
+
+function openSide(){
+  const t = LIVE && LIVE.sideline_at ? new Date(LIVE.sideline_at*1000) : null;
+  $('#sideCtx').textContent = t ? `sidelined at ${t.toLocaleTimeString([],
+    {hour:'2-digit', minute:'2-digit'})} — ${Math.round((Date.now()/1000 -
+    LIVE.sideline_at)/60)} min ago` : '';
+  $('#sideWhy').value = '';
+  $('#sideMsg').textContent = 'esc to cancel';
+  $('#sideWrap').style.display = 'flex';
+  setTimeout(() => $('#sideWhy').focus(), 30);
+}
+function closeSide(){ $('#sideWrap').style.display = 'none'; }
+
+$('#sideBtn').onclick = async () => {
+  if(!LIVE) return;
+  if(LIVE.sidelined) return openSide();
+  if(!sideConf){
+    sideConf = true; renderSide();
+    sideTimer = setTimeout(() => { sideConf = false; renderSide(); }, 4000);
+    return;
+  }
+  clearTimeout(sideTimer); sideConf = false;
+  const b = $('#sideBtn'); b.disabled = true; b.textContent = 'sidelining…';
+  const j = await postOrder({action:'sideline'});
+  if(!j.ok) $('#sideInfo').textContent = 'REFUSED by the server: ' + (j.err || '?');
+  pollEvents(); livePoll();
+};
+
+async function answerSide(answer){
+  $('#sideMsg').textContent = 'sending…';
+  const j = await postOrder({action:'unsideline', answer,
+    note: $('#sideWhy').value.trim().slice(0, 500)});
+  if(!j.ok){ $('#sideMsg').textContent = 'REFUSED by the server: ' + (j.err || '?'); return; }
+  closeSide();
+  $('#sideInfo').textContent = answer === 'yes' ? 'lifting…' : 'staying out';
+  pollEvents(); livePoll();
+}
+$('#sideNo').onclick = () => answerSide('no');
+$('#sideYes').onclick = () => answerSide('yes');
+
 async function postOrder(body){
   try {
     const r = await fetch('/order', {method:'POST', headers:{
@@ -1417,6 +1520,10 @@ $('#keyHint').onclick = () => toggleKey(true);
 $('#legend').onclick = () => toggleKey(false);
 
 addEventListener('keydown', e => {
+  if($('#sideWrap').style.display === 'flex'){
+    if(e.key === 'Escape'){ e.preventDefault(); closeSide(); }
+    return;                                    // never fall through while typing
+  }
   if($('#noteWrap').style.display === 'flex'){
     if(e.key === 'Escape'){ e.preventDefault(); closeNote(); }
     if(e.key === 'Enter' && (e.ctrlKey || e.metaKey)){ e.preventDefault(); saveNote(); }

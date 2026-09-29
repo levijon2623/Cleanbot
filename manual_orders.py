@@ -232,6 +232,8 @@ def arm(eng, seconds=ARM_WINDOW_S):
     if not MANUAL_TRADING_ARMED:
         return False, ("MANUAL_TRADING_ARMED is False — the capability is off "
                        "on this machine, so there is nothing to arm")
+    if sidelined():
+        return False, "SIDELINED until tomorrow — not armed"
     s = max(60.0, min(float(seconds or ARM_WINDOW_S), ARM_MAX_S))
     eng.manual_armed_until = time.time() + s
     _event(True, f"ARMED for {s/60:.0f} min — expires "
@@ -257,7 +259,96 @@ def is_armed(eng):
         from config import MANUAL_TRADING_ARMED
     except Exception:
         return False
-    return bool(MANUAL_TRADING_ARMED) and arm_left(eng) > 0
+    return (bool(MANUAL_TRADING_ARMED) and arm_left(eng) > 0
+            and not sidelined())
+
+
+# ---- the sideline (operator design, 2026-09-29) ---------------------------
+# "Done for the day" as a switch rather than a resolution. SIDELINE disarms
+# and refuses every arm and every entry until the next ET calendar day. It is
+# a FILE, not engine memory, so a restart or a second browser tab cannot
+# quietly lift it; the date in it is what expires it.
+#
+# Lifting it early means answering one question: "Are you trying to give back
+# profits, or increase losses?" -- YES lifts it, NO keeps it. Every answer is
+# appended to SIDELINE_LOG with a note, never pruned: the record of when you
+# came back in, and what happened next, is the useful part.
+#
+# EXITS ARE NOT GATED ON IT, for the same reason they are not gated on arming:
+# sitting out must never trap you in a position you already own.
+SIDELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live",
+                        "sideline.json")
+SIDELINE_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "manual_sideline.jsonl")
+SIDELINE_Q = "Are you trying to give back profits or increase losses?"
+
+
+def _et_today():
+    try:
+        from zoneinfo import ZoneInfo
+        return _dt.datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:                           # noqa: BLE001 -- box runs ET
+        return _dt.date.today().isoformat()
+
+
+def sideline_state():
+    """The sideline record if it is in force TODAY, else None."""
+    s = _read(SIDELINE)
+    return s if isinstance(s, dict) and s.get("date") == _et_today() else None
+
+
+def sidelined():
+    return sideline_state() is not None
+
+
+def _sideline_log(kind, **extra):
+    try:
+        rec = dict(kind=kind, ts=int(time.time()), date=_et_today(), **extra)
+        with open(SIDELINE_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, separators=(",", ":"), default=str) + "\n")
+    except Exception as e:                      # noqa: BLE001 -- never block
+        print(f"  ⚠️ sideline log write failed: {type(e).__name__}: {e}")
+
+
+def sideline(eng):
+    """Disarm and refuse entries until tomorrow. Returns (ok, message)."""
+    if sidelined():
+        return True, "already sidelined until tomorrow"
+    held = sorted(load_positions(eng))
+    try:
+        _write_atomic(SIDELINE, dict(date=_et_today(), at=int(time.time())))
+    except OSError as e:
+        return False, f"could not write the sideline ({e}) — NOT sidelined"
+    eng.manual_armed_until = 0.0
+    _sideline_log("sideline", holds=held)
+    _event(True, "SIDELINED until tomorrow — arming and new entries refused"
+                 + (f"; exits on {', '.join(held)} still work" if held else ""))
+    return True, "sidelined until tomorrow"
+
+
+def unsideline(eng, answer, note=""):
+    """Answer the question. 'yes' lifts the sideline, 'no' keeps it."""
+    s = sideline_state()
+    if not s:
+        return False, "not sidelined"
+    answer = str(answer or "").lower()
+    if answer not in ("yes", "no"):
+        return False, "answer must be yes or no"
+    note = str(note or "")[:500]
+    _sideline_log("answer", answer=answer, note=note, question=SIDELINE_Q,
+                  sidelined_at=s.get("at"),
+                  mins_out=round((time.time() - float(s.get("at") or 0)) / 60, 1))
+    if answer == "no":
+        _event(True, "stayed on the sideline (answered NO) — until tomorrow")
+        return True, "still sidelined until tomorrow"
+    try:
+        os.unlink(SIDELINE)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        return False, f"could not lift the sideline ({e})"
+    _event(True, "sideline LIFTED (answered YES) — arm to trade")
+    return True, "sideline lifted — arm to trade"
 
 
 def extra_dtes(ticker, required):
@@ -579,6 +670,10 @@ def _execute(eng, req, path, now_mod=None):
         ok, msg = (arm(eng, req.get("seconds")) if act == "arm"
                    else disarm(eng, "viewer"))
         return _result(path, ok, msg)
+    if act == "sideline":
+        return _result(path, *sideline(eng))
+    if act == "unsideline":
+        return _result(path, *unsideline(eng, req.get("answer"), req.get("note")))
     if act == "panic":
         r = panic(eng, "911")
         return _result(path, not r["skipped"],
@@ -603,6 +698,8 @@ def _execute(eng, req, path, now_mod=None):
         return _result(path, ok, msg)
     if not MANUAL_TRADING_ARMED:
         return _result(path, False, "MANUAL_TRADING_ARMED is False — not sent")
+    if sidelined():
+        return _result(path, False, "SIDELINED until tomorrow — not sent")
     if arm_left(eng) <= 0:
         return _result(path, False,
                        "the arming window is CLOSED — arm from the viewer "
