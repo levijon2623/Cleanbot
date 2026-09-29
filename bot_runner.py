@@ -23,6 +23,7 @@ import live_state                 # read-only chart emitter; cannot raise
 import manual_orders              # discretionary orders from flow_viewer
 from macro_calendar import is_macro_am_day
 from amt_profile import profile_from_bars, classify_open, amt_ok
+import market_calendar as MC
 from telegram_notifier import (TelegramNotifier, load_trades, round_trips,
                                summarize, summarize_both, _et_date_str)
 from webull_gamma_client import WebullGammaClient
@@ -523,9 +524,18 @@ class FlowExecutionEngine:
         if not want:
             return
         print("\n📐 Seeding prior-day value areas (Auction Market Theory rules)...")
+        # 🚨 THE PRIOR SESSION, NAMED EXPLICITLY. lookback_days=1 counts from
+        # TODAY, and during RTH today already has bars -- so every mid-session
+        # restart built the "prior" VA from today's first minutes (2026-09-29
+        # 09:54: SPY "prior VA" 765.13-765.89, the first 25 minutes of the
+        # day). The backtest (amt_profile.amt_open_map) uses the previous
+        # session's full RTH profile.
+        # previous_trading_day is ON OR BEFORE its argument -- step back first
+        prior = MC.previous_trading_day(market_now().date() - timedelta(days=1))
         for tk in want:
             try:
-                bars = self.uw.get_intraday_bars(tk, lookback_days=1, ohlcv=True)
+                bars = self.uw.get_intraday_bars(tk, lookback_days=1, ohlcv=True,
+                                                 end_date=prior)
             except Exception as e:
                 bars = []
                 print(f"  ├─ {tk}: profile seed failed ({e})")
@@ -543,21 +553,42 @@ class FlowExecutionEngine:
         self._amt_open = {}          # re-classify on the new session's open
 
     def _amt_open_state(self, ticker):
-        """'below_va' / 'inside_va' / 'above_va' for today -- fixed on the first
-        RTH price and cached. None if no prior VA or price yet."""
+        """'below_va' / 'inside_va' / 'above_va' for today, from the 09:30 RTH
+        bar's OPEN -- the backtest's definition -- and cached. None until then.
+
+        🚨 IT USED TO BE "SPOT, WHENEVER FIRST ASKED". The heartbeat asks every
+        minute, so a bot running overnight classified at 00:01 on the last
+        print (2026-09-29 00:01: SPY "open 766.64"), and a bot restarted
+        mid-session classified on the price two minutes after the restart
+        (11:46: "open 763.69"). Neither is the open. It now waits for today's
+        09:30 bar and reads its open from UW; until that exists it answers
+        None and caches nothing, and _match_rule refuses an amt_open rule on
+        None -- an unknown open is not a pass."""
         if ticker in self._amt_open:
             return self._amt_open[ticker]
         va = self._prev_va.get(ticker)
         if not va:
             return None
-        px = self.get_spot_price(ticker)
-        if px <= 0:
+        now = market_now()
+        if now.hour * 60 + now.minute < 9 * 60 + 31:     # the 09:30 bar has not closed
             return None
+        if not MC.is_trading_day(now.date()):
+            return None                   # no 09:30 bar is coming; do not ask UW
+        try:
+            bars = self.uw.get_intraday_bars(ticker, lookback_days=1, ohlcv=True,
+                                             end_date=now.date())
+        except Exception:
+            bars = []
+        first = next((b for b in bars if b["minute_et"][:10] == now.date().isoformat()
+                      and b.get("mod") == 9 * 60 + 30), None)
+        if not first:
+            return None
+        px = float(first["o"])
         loc = classify_open(px, va[0], va[1])
         if loc:
             self._amt_open[ticker] = loc
             print(f"  📐 {ticker}: opened {loc.replace('_', ' ')} "
-                  f"(open {px:.2f} vs prior VA {va[1]:.2f}-{va[0]:.2f})")
+                  f"(09:30 open {px:.2f} vs prior VA {va[1]:.2f}-{va[0]:.2f})")
         return loc
 
     def _record_price_minute(self, tickers, now):
@@ -740,8 +771,12 @@ class FlowExecutionEngine:
             if r.get("amp_min") is not None:
                 if state.get("amp") is None or state["amp"] < r["amp_min"]:
                     continue
-            if r.get("amt_open") and not amt_ok(r["amt_open"], self._amt_open_state(ticker)):
-                continue
+            if r.get("amt_open"):
+                # an UNKNOWN open refuses: amt_ok passes None (the backtest's
+                # "no profile that day"), but live None means "not read yet"
+                loc = self._amt_open_state(ticker)
+                if loc is None or not amt_ok(r["amt_open"], loc):
+                    continue
             if r.get("dex_pct_max") is not None:
                 dp = self.session_dex_pct.get(ticker)
                 if dp is None or dp >= r["dex_pct_max"]:

@@ -730,14 +730,21 @@ class UnusualWhalesClient:
             print(f"  ⚠️ VIX state fetch failed: {e}")
             return None
 
-    def get_intraday_bars(self, ticker: str, lookback_days: int = 3, ohlcv: bool = False):
+    def get_intraday_bars(self, ticker: str, lookback_days: int = 3, ohlcv: bool = False,
+                          end_date=None):
         """Recent 1-minute RTH bars over the last `lookback_days` trading days,
         ascending. Default: [{"minute_et": "YYYY-MM-DDTHH:MM", "close": float}]
         (EMA-stack seed). ohlcv=True also adds "mod"/"o"/"h"/"l"/"v" for the
-        Auction-Market-Theory volume profile."""
+        Auction-Market-Theory volume profile.
+
+        `end_date` (a date) is the newest day counted; default today. During
+        RTH "today" already has bars, so lookback_days=1 means TODAY SO FAR --
+        a caller that wants the previous session must say so (see
+        bot_runner._seed_amt_profiles)."""
         from zoneinfo import ZoneInfo
         et = ZoneInfo("America/New_York")
-        out, day, got, tries = [], datetime.now(et).date(), 0, 0
+        out, got, tries = [], 0, 0
+        day = end_date or datetime.now(et).date()
         while got < lookback_days and tries < lookback_days + 5:
             tries += 1
             if day.weekday() >= 5:
