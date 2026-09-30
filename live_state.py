@@ -99,6 +99,24 @@ _off = False
 _PX = {}
 _PX_CAP = 3000              # ~2 sessions, same bound the tracker uses
 
+# 🚨 THE PRICE LINE IS A SESSION LINE. Webull streams extended-hours prints and
+# the loop runs around the clock, so a bot started at 16:32 on 2026-09-29 drew
+# seventeen hours of after-hours, overnight and premarket price in front of
+# the 2026-09-30 session -- squeezing the part you trade into the right edge.
+# Flow, VWAP and volume are RTH-only already. Price now is too: sampled from
+# one minute before the bell (so the open has a point to move FROM) to the
+# closing minute, on trading days, and filtered again on the way out, so
+# nothing sampled before this rule reaches the chart either.
+PX_FIRST_MOD = 9 * 60 + 29
+PX_LAST_MOD = 16 * 60
+
+
+def _px_minute_ok(epoch_min):
+    from market_calendar import is_trading_day
+    t = _dt.datetime.fromtimestamp(int(epoch_min) * 60, _NY)
+    return (PX_FIRST_MOD <= t.hour * 60 + t.minute <= PX_LAST_MOD
+            and is_trading_day(t.date()))
+
 
 def _sample_price(eng):
     """Read the in-memory spot for every tracked ticker. No network."""
@@ -107,6 +125,8 @@ def _sample_price(eng):
     except Exception:
         return
     now_min = int(time.time() // 60)
+    if not _px_minute_ok(now_min):
+        return
     for tk, bar in list(bars.items()):
         try:
             px = float(bar["close"])
@@ -986,7 +1006,7 @@ def _closed_px(tk):
     b = _PX.get(tk) or {}
     now_min = int(time.time() // 60)
     return [[_et_stamp(int(m) * 60), round(b[m], 4)]
-            for m in sorted(b) if m < now_min]
+            for m in sorted(b) if m < now_min and _px_minute_ok(m)]
 
 
 def _forming_px(tk):
@@ -1017,7 +1037,7 @@ def _forming_px(tk):
     b = _PX.get(tk) or {}
     now = time.time()
     now_min = int(now // 60)
-    if now_min not in b:
+    if now_min not in b or not _px_minute_ok(now_min):
         return None
     return [_et_stamp(int(now)), round(b[now_min], 4)]
 
