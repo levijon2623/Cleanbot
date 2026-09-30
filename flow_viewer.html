@@ -175,7 +175,24 @@
   .ulrow .x{cursor:pointer;color:var(--dim);padding:0 3px;border:1px solid var(--line);
     border-radius:4px;margin-left:3px}
   .ulrow .x:hover{color:var(--fg);border-color:var(--accent)}
-  #ulHold{padding:0 12px}
+  /* The underlying TP/SL panel for the SELECTED manual hold. It used to live
+     inside the telemetry box and pushed the event feed into a sliver; now it
+     pops out to the right of the sidebar (or of the staging panel, if that is
+     open) only while a hold is selected. */
+  #ulPop{position:fixed;left:300px;bottom:0;width:300px;z-index:61;display:none;
+    background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);
+    border-radius:0 8px 0 0;box-shadow:12px 0 28px #0009;padding:10px 12px 12px;
+    font-size:12px}
+  #ulPop .h{display:flex;justify-content:space-between;align-items:baseline;
+    margin-bottom:6px;color:var(--dim);font-size:10px;letter-spacing:.08em;
+    text-transform:uppercase}
+  #ulPop .h b{color:var(--accent);font-size:12px;letter-spacing:0;text-transform:none}
+  #ulPop .hint{color:var(--dim);font-size:11px;margin-top:8px;line-height:1.5}
+  #ulPop .hint b{color:var(--put)}
+  #ulPopX{cursor:pointer;color:var(--dim);padding:0 4px}
+  #ulPopX:hover{color:var(--fg)}
+  #hold .ultag{color:var(--accent);border:1px solid var(--accent);border-radius:3px;
+    padding:0 3px;font-size:9px;margin-left:4px}
   #ulToast{position:fixed;left:50%;top:52px;transform:translateX(-50%);z-index:80;
     background:#0b0f14ee;border:1px solid var(--line);border-radius:6px;padding:6px 12px;
     font-size:12px;display:none;max-width:70vw}
@@ -248,7 +265,6 @@
     <div id="telem">
       <h2><span>guard telemetry</span><span id="telemN"></span></h2>
       <div id="hold"></div>
-      <div id="ulHold"></div>
       <div id="exitbar">
         <button id="xMkt" disabled>SELECT A MANUAL POSITION</button>
         <button id="x911">911</button>
@@ -289,6 +305,7 @@
       <button id="stageX" style="margin-top:14px">close staging</button>
     </div>
   </div>
+  <div id="ulPop"></div>
   <div id="main">
     <div id="bar"><span class="k">loading…</span></div>
     <div id="chart"><div id="empty">loading <code>tape/index.json</code>…</div></div>
@@ -539,6 +556,7 @@ function liveStop(){
   // the order desk is meaningless without a live engine behind it
   SEL = null; openTk = null; HOLDSEL = null; disarmFire(); disarmPanic();
   $('#stage').style.display = 'none'; $('#telem').style.display = 'none';
+  $('#ulPop').style.display = 'none'; placeUlPop();
   if(cur) draw(cur); else renderList();
 }
 
@@ -948,27 +966,42 @@ function renderUlStage(){
     STAGE_UL[x.dataset.ulx] = null; renderUlStage(); drawUl(); });
 }
 
+function placeUlPop(){
+  const st = $('#stage'), pop = $('#ulPop');
+  const left = (st && st.style.display === 'flex') ? 630 : 300;
+  pop.style.left = left + 'px';
+  /* the chart key and its hint live in the same bottom-left corner: step
+     them clear of the popout while it is open, back when it closes */
+  const k = pop.style.display === 'block' ? (left + 312) + 'px' : '';
+  $('#keyHint').style.left = k; $('#legend').style.left = k;
+}
+
 function renderUlHold(){
-  const el = $('#ulHold'); if(!el || !LIVE) return;
-  const rows = [];
-  for(const [t, p] of Object.entries(LIVE.manual || {})){
-    if(p.ul_tp == null && p.ul_sl == null) continue;
-    const spot = (LIVE.tickers[t] || {}).spot;
-    const part = k => p['ul_' + k] != null
-      ? `<span>${k.toUpperCase()} <b class="${k}">${Number(p['ul_' + k]).toFixed(2)}</b>${
-          ulPct(Number(p['ul_' + k]), spot)}<span class="x" data-ult="${t}" data-ulk="${k}">✕</span></span>`
-      : `<span>${k.toUpperCase()} —</span>`;
-    rows.push(`<div class="ulrow"><span>${t} underlying</span>${part('tp')}${part('sl')}${
+  const el = $('#ulPop'); if(!el) return;
+  const t = HOLDSEL, p = (LIVE && t) ? (LIVE.manual || {})[t] : null;
+  if(!p){ el.style.display = 'none'; placeUlPop(); return; }
+  const spot = (LIVE.tickers[t] || {}).spot;
+  const part = k => p['ul_' + k] != null
+    ? `<span>${k.toUpperCase()} <b class="${k}">${Number(p['ul_' + k]).toFixed(2)}</b>${
+        ulPct(Number(p['ul_' + k]), spot)}<span class="x" data-ulk="${k}">✕</span></span>`
+    : `<span>${k.toUpperCase()} —</span>`;
+  const onChart = liveTk === t;
+  el.innerHTML = `<div class="h"><span>underlying TP/SL · <b>◆ ${esc(t)} ${
+      p.strike ?? ''}${p.right ?? ''}</b></span><span id="ulPopX" title="deselect">✕</span></div>
+    <label class="chk" style="display:flex;gap:6px;align-items:center;cursor:pointer">
+      <input type="checkbox" class="ulOn" style="width:auto"> enable — T or S + click the price chart</label>
+    <div class="ulrow">${part('tp')}${part('sl')}${
       p.ul_blind ? '<b style="color:var(--dn)">BLIND — no live price</b>' : ''}${
-      p.pending ? '<span>(active once filled)</span>' : ''}</div>`);
-  }
-  el.innerHTML = rows.join('') + `<div class="ulrow"><label class="chk" style="display:flex;
-    gap:6px;align-items:center;cursor:pointer"><input type="checkbox" class="ulOn"
-    style="width:auto"> underlying TP/SL — T/S + click the chart</label></div>`;
+      p.pending ? '<span>(active once filled)</span>' : ''}</div>
+    <div class="hint">${!UL_ON ? 'tick enable to place levels'
+      : onChart ? `spot ${spot != null ? Number(spot).toFixed(2) : '?'} · hold <b>T</b> or <b>S</b> and click`
+      : `the chart shows ${esc(liveTk || '—')} — open <b>${esc(t)}</b> to place levels`}</div>`;
+  el.style.display = 'block'; placeUlPop();
   el.querySelectorAll('.ulOn').forEach(x => { x.checked = UL_ON; x.onchange = () => setUlOn(x.checked); });
-  el.querySelectorAll('[data-ult]').forEach(x => x.onclick = async () => {
-    const j = await postOrder({action:'levels', ticker:x.dataset.ult, [x.dataset.ulk]: null});
-    ulToast(j.ok ? `clearing ${x.dataset.ult} ${x.dataset.ulk.toUpperCase()} — verdict in telemetry`
+  $('#ulPopX').onclick = () => { HOLDSEL = null; disarmPanic(); renderHold(); };
+  el.querySelectorAll('[data-ulk]').forEach(x => x.onclick = async () => {
+    const j = await postOrder({action:'levels', ticker:t, [x.dataset.ulk]: null});
+    ulToast(j.ok ? `clearing ${t} ${x.dataset.ulk.toUpperCase()} — verdict in telemetry`
                  : 'REFUSED: ' + (j.err || '?'), !j.ok);
     pollEvents();
   });
@@ -1032,8 +1065,8 @@ async function ulClick(p){
 
 function renderStage(){
   const c = selContract();
-  if(!SEL){ $('#stage').style.display = 'none'; return; }
-  $('#stage').style.display = 'flex';
+  if(!SEL){ $('#stage').style.display = 'none'; placeUlPop(); return; }
+  $('#stage').style.display = 'flex'; placeUlPop();
   renderUlStage();
 
   /* 🚨 ARMED MEANS REAL. There is no "armed but pretend" state any more:
@@ -1203,7 +1236,7 @@ $('#armBtn').onclick = async () => {
 $('#buyC').onclick = () => fire('C');
 $('#buyP').onclick = () => fire('P');
 $('#stageX').onclick = () => {
-  SEL = null; disarmFire(); $('#stage').style.display = 'none';
+  SEL = null; disarmFire(); $('#stage').style.display = 'none'; placeUlPop();
   if(LIVE) liveList(LIVE);
 };
 for(const id of ['#qtyR', '#qtyN'])
@@ -1279,7 +1312,10 @@ function renderHold(){
         p.qty}x ${p.strike ?? ''}${p.right ?? ''}
         <span class="d">${p.pending ? `limit ${px2(p.limit)}`
                                     : '@ ' + p.entry}${
-          p.dry ? ' DRY' : ''}</span></span>
+          p.dry ? ' DRY' : ''}</span>${
+        (p.ul_tp != null || p.ul_sl != null) ? `<span class="ultag" title="underlying${
+          p.ul_tp != null ? ' TP ' + Number(p.ul_tp).toFixed(2) : ''}${
+          p.ul_sl != null ? ' SL ' + Number(p.ul_sl).toFixed(2) : ''}">TP/SL</span>` : ''}</span>
       <span>${p.pending
         ? `<span style="color:var(--put)">${
             p.cancel_sent ? 'cancelling…' : 'PENDING FILL'}</span>`
