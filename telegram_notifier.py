@@ -38,6 +38,16 @@ import requests
 
 API = "https://api.telegram.org/bot{token}/{method}"
 _TIMEOUT = 12
+_TRIES = 3            # per message, see TelegramNotifier._deliver
+_RETRY_WAIT = 2.0     # seconds between retries (timeouts, 5xx)
+_MAX_WAIT = 60.0      # cap on Telegram's own 429 retry_after
+
+
+def _plain(text: str) -> str:
+    """The message without HTML tags or entities -- for the plain-text resend
+    and for log lines."""
+    import re
+    return html.unescape(re.sub(r"<[^>]+>", "", text or ""))
 
 
 # --------------------------------------------------------------------------
@@ -253,7 +263,8 @@ class TelegramNotifier:
         try:
             self._q.put_nowait(text)
         except queue.Full:
-            pass
+            print("  ⚠️ Telegram queue full (200) -- message DROPPED: "
+                  f"{_plain(text).splitlines()[0][:80] if text else ''}")
 
     def trade(self, entry: dict):
         """Format one log_trade() dict as a push."""
@@ -287,12 +298,60 @@ class TelegramNotifier:
             except queue.Empty:
                 continue
             try:
-                requests.post(API.format(token=self.token, method="sendMessage"),
-                              json={"chat_id": self.chat_id, "text": text,
-                                    "parse_mode": "HTML", "disable_web_page_preview": True},
-                              timeout=_TIMEOUT)
-            except Exception:
+                self._deliver(text)
+            except Exception:           # the worker thread must never die
                 pass
+
+    def _deliver(self, text: str) -> bool:
+        """POST one message, and CHECK THE ANSWER.
+
+        🚨 A LOST EXIT LOOKED LIKE A DOUBLE POSITION (2026-10-01). This used to
+        fire the POST and ignore the reply, with every exception swallowed. At
+        14:34:53 an SMH trail-stop EXIT never reached the chat, so the next
+        ENTRY appeared to stack on an open position -- while the ledger and the
+        engine were both correct. A 429, a 400 or a timeout all vanished the
+        same way, and nothing in the log could say which. Now: 429 waits
+        Telegram's own retry_after and resends; a timeout or 5xx retries; an
+        HTML parse rejection is resent as plain text; anything still failing
+        prints one line so the gap is visible.
+
+        🚨 NEVER PRINT str(exception) OR THE URL. requests' error text carries
+        the full URL, and the URL carries the bot token. Type names only.
+        """
+        url = API.format(token=self.token, method="sendMessage")
+        body = {"chat_id": self.chat_id, "text": text,
+                "parse_mode": "HTML", "disable_web_page_preview": True}
+        last = "?"
+        for _ in range(_TRIES):
+            try:
+                r = requests.post(url, json=body, timeout=_TIMEOUT)
+            except Exception as e:      # timeout / connection -- retry
+                last = type(e).__name__
+                time.sleep(_RETRY_WAIT)
+                continue
+            try:
+                j = r.json()
+            except Exception:
+                j = {}
+            if r.status_code == 200 and j.get("ok"):
+                return True
+            desc = str(j.get("description") or "")[:120]
+            last = f"HTTP {r.status_code} {desc}".strip()
+            if r.status_code == 429:
+                wait = (j.get("parameters") or {}).get("retry_after") or _RETRY_WAIT
+                time.sleep(min(float(wait), _MAX_WAIT))
+                continue
+            if r.status_code == 400 and "parse" in desc.lower() and "parse_mode" in body:
+                body = {"chat_id": self.chat_id, "text": _plain(text),
+                        "disable_web_page_preview": True}
+                continue                # same message, no HTML
+            if r.status_code >= 500:
+                time.sleep(_RETRY_WAIT)
+                continue
+            break                       # 400/401/403/404: retrying cannot help
+        print(f"  ⚠️ Telegram send FAILED ({last}) after {_TRIES} tries: "
+              f"{_plain(text).splitlines()[0][:80] if text else ''}")
+        return False
 
     # -- inbound commands --------------------------------------------
     def start_commands(self, handlers: dict):
