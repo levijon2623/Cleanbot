@@ -66,7 +66,7 @@ def head():
     if not k:
         sys.exit("  UW_API_KEY not in env")
     return {"Authorization": f"Bearer {k}", "Accept": "application/json",
-            "User-Agent": "cleanbot-fillcal/1.0", "UW-CLIENT-API-ID": "100003"}
+            "User-Agent": "webullrg-fillcal/1.0", "UW-CLIENT-API-ID": "100003"}
 
 
 def traded_contracts(since):

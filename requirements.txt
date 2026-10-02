@@ -1,4 +1,4 @@
-# Cleanbot dependencies.
+# WeBullRG dependencies.
 #
 # Floors, not pins. The versions in the comments are what this was developed and
 # run against as of 2026-09-26 -- if something breaks, check against those first.

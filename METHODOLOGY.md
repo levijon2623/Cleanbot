@@ -1,4 +1,4 @@
-# Cleanbot Research Methodology
+# WeBullRG Research Methodology
 
 How to test an idea against this book without fooling yourself. Every rule here
 was learned by getting it wrong first; the cost of each mistake is noted so the

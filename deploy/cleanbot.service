@@ -22,7 +22,7 @@
 # until the bot's own live rollout is a decision you have made deliberately.
 
 [Unit]
-Description=Cleanbot flow engine
+Description=WeBullRG flow engine
 After=network-online.target
 Wants=network-online.target
 # 🚨 THESE TWO BELONG IN [Unit], NOT [Service]. systemd 255 logs

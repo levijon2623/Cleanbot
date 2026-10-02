@@ -1,4 +1,4 @@
-# Cleanbot
+# WeBullRG
 
 A directional 0DTE/1DTE options bot and the research toolkit that produced it.
 
@@ -113,7 +113,7 @@ across the week.
 ## Quick start
 
 ```sh
-git clone <this repo> && cd Cleanbot
+git clone <this repo> && cd WeBullRG
 python -m venv venv && venv/bin/pip install -r requirements.txt
 
 cp .env.example .env        # then fill in UW_API_KEY at minimum

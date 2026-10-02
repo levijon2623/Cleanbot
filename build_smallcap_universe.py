@@ -39,7 +39,7 @@ from dotenv import load_dotenv
 load_dotenv()
 API = "https://api.unusualwhales.com/api"
 HDRS = {"Authorization": f"Bearer {os.getenv('UW_API_KEY')}", "Accept": "application/json",
-        "User-Agent": "cleanbot/1.0"}
+        "User-Agent": "webullrg/1.0"}
 SILVER = "lake/silver/option-contracts-1m"
 CACHE_DIR = "_universe_cache"
 INFO_CACHE = f"{CACHE_DIR}/info.json"

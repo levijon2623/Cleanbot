@@ -69,7 +69,7 @@ def client():
     if not key:
         sys.exit("  UW_API_KEY not in env")
     return {"Authorization": f"Bearer {key}", "Accept": "application/json",
-            "User-Agent": "cleanbot-reconcile/1.0", "UW-CLIENT-API-ID": "100003"}
+            "User-Agent": "webullrg-reconcile/1.0", "UW-CLIENT-API-ID": "100003"}
 
 
 def fetch_quotes(h, contract, date):

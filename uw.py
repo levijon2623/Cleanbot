@@ -66,7 +66,7 @@ def _headers():
         if not k:
             sys.exit("  UW_API_KEY not in env (.env, or export it)")
         _HDRS = {"Authorization": f"Bearer {k}", "Accept": "application/json",
-                 "User-Agent": "cleanbot-uw/1.0", "UW-CLIENT-API-ID": "100003"}
+                 "User-Agent": "webullrg-uw/1.0", "UW-CLIENT-API-ID": "100003"}
     return _HDRS
 
 

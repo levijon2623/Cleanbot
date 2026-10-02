@@ -21,7 +21,7 @@
 # machine would pull a copy over the top of the file being written.
 
 [Unit]
-Description=Cleanbot flow viewer
+Description=WeBullRG flow viewer
 After=cleanbot.service network-online.target
 Wants=network-online.target
 
