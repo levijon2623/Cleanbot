@@ -215,9 +215,30 @@ away.
 
 ## Data you need
 
+It depends on which half of the repository you use.
+
+**Trading by hand from the live viewer** — the chart, the strike strip, staged
+orders, underlying TP/SL and the sideline — is designed to need nothing but a
+Webull account:
+
 | source | used for | cost |
 |---|---|---|
-| Unusual Whales | options flow, GEX, dark pool, the entire signal | subscription |
+| Webull OpenAPI | order execution, live stock and option quotes, and the option greeks and open interest the GEX heat is computed from | a Webull account with real-time US stock and option (OPRA) market data enabled |
+
+> **Status:** the Webull-only data path is validated but not yet wired in. On
+> 2026-10-01 a GEX heat built from Webull's own greeks and open interest
+> matched the Unusual Whales heat the chart draws (median correlation
+> 0.998–0.999 on SPY, QQQ and IWM; `check_webull_gex.py`). Until the viewer
+> gains that mode it still reads GEX, VWAP volume and flow from Unusual
+> Whales. Even then, the flow panes — cumulative net premium and sweeps — stay
+> Unusual Whales only: Webull's option prints carry no exchange or condition
+> codes, so sweeps and multi-leg trades cannot be separated out of them.
+
+**The bot's own signal, research and backtesting** need the full set:
+
+| source | used for | cost |
+|---|---|---|
+| Unusual Whales | options flow, GEX, dark pool — the entire signal, and the history every backtest is built from | subscription |
 | Webull OpenAPI | execution, option quotes over MQTT | free with an account |
 | Databento | MBO order-book research only (`fetch_mbo.py`, `check_book_*.py`) | paid, optional |
 
