@@ -72,6 +72,18 @@ net premium, its EMA(5), and sweeps-only flow.
 
 ![Live flow viewer, QQQ](docs/images/viewer-live-qqq.png)
 
+**GEX with the index added (`γ SPY+SPX`).** The cyan heat is SPY's 0–1DTE
+gamma plus SPX's, mapped onto SPY's price by the session's median SPX/SPY
+ratio (SPX carries most of the near-dated S&P gamma — about 86% of it on
+2026-10-01, the session shown). A strike where the index dominates is labelled with the SPX strike
+behind it (`γ −4682.9M · SPX 7625` at 760), and the index's own biggest
+strikes are drawn dotted at their exact mapped price (`SPX 7650 put` at
+762.41) — two or three dollars off SPY's round numbers. The γ pill in the bar
+or `g` toggles it; QQQ+NDX and IWM+RUT work the same way, and the weekly page
+has the same switch. The dashed gamma flip stays SPY's own.
+
+![Live flow viewer, SPY with SPX gamma added](docs/images/viewer-index-blend-spy.png)
+
 **Strike strip.** Each tradeable ETF drops down to its live basket — the
 0DTE calls a rule trades and the puts kept for discretionary orders — with
 bid/ask, volume and open interest, re-centred on spot as price moves.
