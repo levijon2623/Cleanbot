@@ -236,9 +236,14 @@ def _vwap_loop(eng):
                 try:
                     today = _dt.datetime.now(_NY).date().isoformat()
                     need = tk not in _VOLBASE
-                    bars = eng.uw.get_intraday_bars(
-                        tk, lookback_days=(RVOL_DAYS + 1 if need else 1),
-                        ohlcv=True)
+                    import webull_viewer_data as WV
+                    if WV.source() == "webull":
+                        # same bar dicts (webull_viewer_data._bar_dict), RTH only
+                        bars = WV.bars_1m(tk, sessions=(RVOL_DAYS + 1 if need else 1))
+                    else:
+                        bars = eng.uw.get_intraday_bars(
+                            tk, lookback_days=(RVOL_DAYS + 1 if need else 1),
+                            ohlcv=True)
                     if need:
                         base = _volume_baseline(bars, today)
                         if base:
@@ -546,35 +551,148 @@ def _fetch_index_blend(uw, tk, spot, g):
         if not rt:
             print(f"  ⚠️ [GEX BLEND] {tk}: no {idx}/{tk} ratio yet -- blend not drawn")
             return
-        today = _dt.datetime.now(_NY).date().isoformat()
-        etf_rows = _GEX_NEAR.get(tk) or []
-        # the SAME 0-1DTE expiries as the ETF heat, so the toggle changes one thing
-        want = _want_01(etf_rows, today)
-        lo, hi = spot * (1 - GEX_BAND), spot * (1 + GEX_BAND)
-        e_heat = IX.heat_of(etf_rows, want, lo, hi)
-        blended, prov = IX.blend_rows([r for r in etf_rows if r["e"] in want],
-                                      [r for r in rows if r["e"] in want], rt["ratio"])
-        b_heat = IX.heat_of(blended, want, lo, hi)
-        i_heat = {k: [b_heat[k][0] - e_heat.get(k, [0, 0])[0],
-                      b_heat[k][1] - e_heat.get(k, [0, 0])[1]] for k in b_heat}
-        heat = []
-        for k in sorted(b_heat):
-            net = b_heat[k][0] + b_heat[k][1]
-            if abs(net) <= 0:
-                continue
-            heat.append([k, round(net), IX.native_label(
-                idx, k, want, prov, sum(e_heat.get(k, [0, 0])), sum(i_heat[k]))])
-        g["blend"] = dict(
-            idx=idx, ratio=rt["ratio"], ratio_src=rt["src"], ratio_n=rt.get("n"),
-            heat=heat, share=_num(IX.share(e_heat, i_heat), 3),
-            levels=IX.index_levels(idx, rows, want, rt["ratio"], lo, hi),
-            expiries=sorted(want), ts=int(time.time()),
-            uw_date=max((r.get("d") or "" for r in rows), default=None))
+        _build_blend(tk, spot, g, idx, rows, rt)
     except Exception as e:                      # never reach the GEX loop
         print(f"  ⚠️ [GEX BLEND] {tk}: {type(e).__name__}: {e}")
 
 
-LEVELS_LOG =os.path.join(os.path.dirname(os.path.abspath(__file__)),
+def _build_blend(tk, spot, g, idx, rows, rt):
+    """g["blend"] from the ETF's _GEX_NEAR rows + the index `rows` mapped by
+    `rt` -- identical for UW and Webull rows, which share one shape and unit."""
+    import index_gex as IX
+    today = _dt.datetime.now(_NY).date().isoformat()
+    etf_rows = _GEX_NEAR.get(tk) or []
+    # the SAME 0-1DTE expiries as the ETF heat, so the toggle changes one thing
+    want = _want_01(etf_rows, today)
+    lo, hi = spot * (1 - GEX_BAND), spot * (1 + GEX_BAND)
+    e_heat = IX.heat_of(etf_rows, want, lo, hi)
+    blended, prov = IX.blend_rows([r for r in etf_rows if r["e"] in want],
+                                  [r for r in rows if r["e"] in want], rt["ratio"])
+    b_heat = IX.heat_of(blended, want, lo, hi)
+    i_heat = {k: [b_heat[k][0] - e_heat.get(k, [0, 0])[0],
+                  b_heat[k][1] - e_heat.get(k, [0, 0])[1]] for k in b_heat}
+    heat = []
+    for k in sorted(b_heat):
+        net = b_heat[k][0] + b_heat[k][1]
+        if abs(net) <= 0:
+            continue
+        heat.append([k, round(net), IX.native_label(
+            idx, k, want, prov, sum(e_heat.get(k, [0, 0])), sum(i_heat[k]))])
+    g["blend"] = dict(
+        idx=idx, ratio=rt["ratio"], ratio_src=rt["src"], ratio_n=rt.get("n"),
+        heat=heat, share=_num(IX.share(e_heat, i_heat), 3),
+        levels=IX.index_levels(idx, rows, want, rt["ratio"], lo, hi),
+        walls01=IX.walls_with_ties({k: tuple(v) for k, v in b_heat.items()}),
+        expiries=sorted(want), ts=int(time.time()),
+        uw_date=max((r.get("d") or "" for r in rows), default=None))
+
+
+# ---------------------------------------------------------------- WEBULL DATA
+# The same rows, heat, blend and strike-strip stats from Webull alone (see
+# webull_viewer_data.py for what is and is not available, and why the source is
+# a setting resolved once rather than a fallback).
+_WB_COV = {}            # {ticker: (coverage, contracts)} of the last snapshot pass
+
+
+def _weekly_needs_full(tk):
+    """True while today's weekly snapshot (or its +index blend) is still to be
+    taken -- the only passes that need the whole week's expiries at +-5%."""
+    if tk not in WEEKLY_TICKERS:
+        return False
+    now = _dt.datetime.now(_NY)
+    if now.hour * 60 + now.minute < WEEKLY_AT_MOD:
+        return False
+    try:
+        with _WK_LOCK:
+            monday, days = _week_days(now.date())
+            if now.date() not in days:
+                return False
+            snap = (_wk_doc(monday, days)["tickers"].get(tk) or {}).get(
+                "snapshots", {}).get(now.date().isoformat())
+        import index_gex as IX
+        return snap is None or (tk in IX.INDEX_OF and "blend" not in snap)
+    except Exception:
+        return False
+
+
+def _fetch_gex_webull(tk, spot):
+    """_fetch_gex's result from Webull option snapshots. No all-OI walls or
+    gamma flip (UW /gex-levels needs the whole chain): `walls` is empty and the
+    0-1DTE heat's own walls, with ties flagged, ride in `walls01`."""
+    import index_gex as IX
+    import webull_viewer_data as WV
+    today = _dt.datetime.now(_NY).date()
+    full = _weekly_needs_full(tk)
+    listed = WV.expiries_for(WV._directory(tk), today, 7)
+    exps = listed if full else sorted(WV.want_01(listed, today.isoformat()))
+    band = (WEEKLY_BAND + 0.005) if full else GEX_BAND
+    rows, _q, stats, cov, n = WV.snapshot_rows(tk, spot, band, exps)
+    _CSTAT.update({s: v for s, v in stats.items() if v.get("oi") is not None})
+    _WB_COV[tk] = (round(cov, 3), n)
+    if not rows:
+        print(f"  ⚠️ [GEX webull] {tk}: no usable option snapshots "
+              f"({n} contracts asked) -- heat will be EMPTY")
+    _GEX_NEAR[tk] = rows
+    want = WV.want_01(listed, today.isoformat())
+    lo, hi = spot * (1 - GEX_BAND), spot * (1 + GEX_BAND)
+    agg = {}
+    for r in rows:
+        if r["e"] in want and lo <= r["k"] <= hi:
+            a = agg.setdefault(r["k"], [0.0, 0.0])
+            a[0] += r["cg"]
+            a[1] += r["pg"]
+    heat = sorted([[k, round(v[0] + v[1])] for k, v in agg.items() if v[0] + v[1]])
+    return dict(heat=heat, walls={}, src="webull", ts=int(time.time()),
+                nearby_flips=[], uw_time=None, uw_date=today.isoformat(),
+                walls01=IX.walls_with_ties({k: tuple(v) for k, v in agg.items()}),
+                coverage=round(cov, 3), contracts=n)
+
+
+def _fetch_index_blend_webull(tk, spot, g):
+    """_fetch_index_blend from Webull: index chain snapshots, forward by
+    put-call parity, ratio = forward / the ETF's Webull spot."""
+    import index_gex as IX
+    import webull_viewer_data as WV
+    idx = IX.INDEX_OF.get(tk)
+    if not idx or not spot:
+        return
+    try:
+        # 🚨 NOT BEFORE 09:31. Pre-open the ETF trades while the index options
+        # still show yesterday's closing marks, so the parity forward and the
+        # ETF spot come from different moments: at 03:10 on 2026-10-02 this read
+        # SPX/SPY 10.068 against UW's 10.037 -- 3 SPY dollars of mis-mapping.
+        # In RTH both legs are live (the 2026-10-01 test: within 0.046%).
+        _now = _dt.datetime.now(_NY)
+        if _now.hour * 60 + _now.minute < 9 * 60 + 31:
+            return
+        today = _now.date()
+        etf_spot = WV.spot(tk) or spot
+        seed = etf_spot * IX.SEED_RATIO[tk]
+        full = _weekly_needs_full(tk)
+        listed = WV.expiries_for(WV._directory(idx), today, 7)
+        exps = listed if full else sorted(WV.want_01(listed, today.isoformat()))
+        band = (WEEKLY_BAND if full else GEX_BAND) + 0.005   # seed ratio is approximate
+        rows, quotes, _s, _cov, _n = WV.snapshot_rows(idx, seed, band, exps)
+        first = min(exps) if exps else None
+        f6 = first[2:4] + first[5:7] + first[8:10] if first else ""
+        fwd = WV.index_forward({s: q for s, q in quotes.items() if s[-15:-9] == f6}, seed)
+        if not rows or not fwd:
+            print(f"  ⚠️ [GEX BLEND webull] {tk}: no {idx} "
+                  f"{'rows' if not rows else 'parity forward'} -- blend not drawn")
+            return
+        k2 = (fwd / seed) ** 2                   # rows were built at S = seed
+        for r in rows:
+            r["cg"] *= k2
+            r["pg"] *= k2
+        _GEX_IDX_NEAR[tk] = rows
+        rt = dict(ratio=round(fwd / etf_spot, 5), src="parity", n=None, day=today.isoformat())
+        _IDX_RATIO[tk] = rt
+        _build_blend(tk, spot, g, idx, rows, rt)
+    except Exception as e:                       # never reach the GEX loop
+        print(f"  ⚠️ [GEX BLEND webull] {tk}: {type(e).__name__}: {e}")
+
+
+LEVELS_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "gex_levels_log.jsonl")
 
 
@@ -706,11 +824,24 @@ def _expiry_heat(rows, spot):
     if not heat:
         return None
     times = sorted(r["t"] for r in rows if r.get("t"))
-    return dict(heat=heat,
-                call_wall=max(heat, key=lambda h: h[2])[0],
-                put_wall=min(heat, key=lambda h: h[3])[0],
-                peak=max(heat, key=lambda h: abs(h[1]))[0],
-                uw_time_max=times[-1] if times else None)
+    out = dict(heat=heat,
+               call_wall=max(heat, key=lambda h: h[2])[0],
+               put_wall=min(heat, key=lambda h: h[3])[0],
+               peak=max(heat, key=lambda h: abs(h[1]))[0],
+               uw_time_max=times[-1] if times else None)
+    # 🚨 A WALL WITH A NEAR-EQUAL RIVAL IS A ZONE, NOT A STRIKE. Flag the
+    # runner-up (index_gex.WALL_TIE) so the page can say "760 ≈ 762" instead of
+    # crowning one -- on SPY+SPX the two data sources agreed on the single wall
+    # only half the time (check_webull_blend, 2026-10-01).
+    try:
+        import index_gex as IX
+        w = IX.walls_with_ties({h[0]: (h[2], h[3]) for h in heat}) or {}
+        for k in ("call_wall_alt", "put_wall_alt", "peak_alt"):
+            if k in w:
+                out[k] = w[k]
+    except Exception:
+        pass
+    return out
 
 
 def _px_5m_today(tk, today):
@@ -741,6 +872,12 @@ def _px_5m_of(bars):
 
 def _day_bars_1m(uw, tk, day):
     """One completed day's RTH 1m bars from ohlc/1m: [(mod, o, h, l, c)]."""
+    import webull_viewer_data as WV
+    if WV.source() == "webull":
+        back = max(2, (_dt.datetime.now(_NY).date() - day).days + 2)
+        return [(b["mod"], b["o"], b["h"], b["l"], b["c"])
+                for b in WV.bars_1m(tk, sessions=back)
+                if b["minute_et"][:10] == day.isoformat() and 570 <= b["mod"] < 960]
     rows = _uw_get(uw, f"/api/stock/{tk}/ohlc/1m", date=day.isoformat()) or []
     out = {}
     for x in rows:
@@ -908,7 +1045,7 @@ def _weekly_update_locked(uw, tk, spot):
             if exp:
                 t["snapshots"][iso] = dict(
                     taken_et=now.isoformat(timespec="seconds"), spot=round(spot, 4),
-                    uw_date=data_dates[-1], exp=exp)
+                    uw_date=data_dates[-1], exp=exp, src=_data_src())
                 changed = True
                 print(f"  📅 [WEEKLY GEX] {tk}: snapshot {iso} -- "
                       f"{len(exp)} expir{'y' if len(exp) == 1 else 'ies'} "
@@ -955,13 +1092,21 @@ def _gex_loop(eng):
             time.sleep(CLOSED_SLEEP)
             continue
         try:
+            import webull_viewer_data as WV
+            wb = WV.source() == "webull"
             names = sorted({r["ticker"] for r in _rules()})
             for tk in names:
                 try:
                     spot = (_PX.get(tk) or {})
                     spot = spot[max(spot)] if spot else None
-                    g = _fetch_gex(eng.uw, tk, spot)
-                    _fetch_index_blend(eng.uw, tk, spot, g)   # never raises
+                    if wb:
+                        if not spot:
+                            continue            # the band needs a price first
+                        g = _fetch_gex_webull(tk, spot)
+                        _fetch_index_blend_webull(tk, spot, g)   # never raises
+                    else:
+                        g = _fetch_gex(eng.uw, tk, spot)
+                        _fetch_index_blend(eng.uw, tk, spot, g)   # never raises
                     if g["heat"] or g["walls"]:
                         _GEX[tk] = g
                     if tk in WEEKLY_TICKERS:
@@ -970,7 +1115,8 @@ def _gex_loop(eng):
                         except Exception as e:      # never reach the loop
                             print(f"  ⚠️ [WEEKLY GEX] {tk}: {type(e).__name__}: {e}")
                     try:
-                        cs = _fetch_contract_stats(eng.uw, tk)
+                        # webull: already filled from the heat's own snapshots
+                        cs = None if wb else _fetch_contract_stats(eng.uw, tk)
                         if cs:
                             _CSTAT.update(cs)
                     except Exception:
@@ -1184,6 +1330,9 @@ def _start_sweep(eng):
     global _SW_THREAD
     if _SW_THREAD is not None or not hasattr(eng, "uw"):
         return
+    import webull_viewer_data as WV
+    if WV.source() == "webull":
+        return          # sweeps are UW /flow-alerts; Webull prints carry no sweep flag
     try:
         import threading
         _SW_THREAD = threading.Thread(target=_sweep_loop, args=(eng,),
@@ -1552,8 +1701,35 @@ def snapshot(eng):
         dry_run=bool(globals().get("_DRY", True)),
         equity=_num(getattr(eng, "account_equity", None), 2),
         n_open=len(getattr(eng, "active_snipes", {}) or {}),
+        # WHERE THE CHART'S NUMBERS COME FROM, said on the chart. data_src is the
+        # viewer's market data (VIEWER_DATA); flow_src is the ENGINE's flow --
+        # None when it runs manual-only without a UW key, so the flow pane can
+        # say "needs Unusual Whales" instead of drawing a flat line at zero.
+        data_src=_data_src(),
+        flow_src="uw" if getattr(eng, "uw_enabled", True) else None,
+        webull_data=_webull_stats(),
         tickers=tk_state,
     )
+
+
+def _data_src():
+    try:
+        import webull_viewer_data as WV
+        return WV.source()
+    except Exception:
+        return "uw"
+
+
+def _webull_stats():
+    """Webull REST health for the chart: calls, failures, last failure, and
+    each ticker's snapshot coverage. None in UW mode."""
+    try:
+        import webull_viewer_data as WV
+        if WV.source() != "webull":
+            return None
+        return dict(WV.STATS, coverage={k: v[0] for k, v in _WB_COV.items()})
+    except Exception:
+        return None
 
 
 def tick(eng, path=OUT, force=False):

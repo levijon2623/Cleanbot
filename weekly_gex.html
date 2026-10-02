@@ -137,7 +137,7 @@ function pick(E, V){
     if (s <= lim && snaps[s].exp && snaps[s].exp[E]) best = s;
   if (!best) return null;
   const S = snaps[best], b = S.blend, bl = $('#gx').value && b && b.exp && b.exp[E];
-  return {snap: best, taken: S.taken_et, spot: S.spot, ...(bl || S.exp[E]),
+  return {snap: best, taken: S.taken_et, spot: S.spot, src: S.src, ...(bl || S.exp[E]),
           blended: !!bl, wantBlend: !!$('#gx').value,
           bmeta: bl ? {idx: b.idx, ratio: b.ratio, src: b.ratio_src, taken: b.taken_et} : null};
 }
@@ -198,7 +198,15 @@ function draw(){
       g.beginPath(); g.moveTo(i * cw + 2, y(k)); g.lineTo((i + 1) * cw - 2, y(k)); g.stroke();
       g.setLineDash([]);
       const nat = c.blended && c.labels && c.labels[key];
-      markLabel(g, nat && cw >= 150 ? `${k} · ${nat}` : String(k), i * cw + 4, y(k), col);
+      // a wall with a near-equal rival is a ZONE (index_gex.WALL_TIE) -- say so
+      const alt = c[key + '_alt'];
+      const txt = `${k}${alt != null ? ' ≈ ' + alt : ''}`;
+      markLabel(g, nat && cw >= 150 ? `${txt} · ${nat}` : txt, i * cw + 4, y(k), col);
+      if (alt != null && alt >= lo && alt <= hi){
+        g.strokeStyle = col; g.lineWidth = 1; g.setLineDash([2, 4]);
+        g.beginPath(); g.moveTo(i * cw + 2, y(alt)); g.lineTo((i + 1) * cw - 2, y(alt)); g.stroke();
+        g.setLineDash([]);
+      }
     }
   });
 
@@ -292,7 +300,12 @@ $('#wrap').addEventListener('mousemove', ev => {
     const h = c.heat.reduce((b, h) => Math.abs(h[0] - p) < Math.abs(b[0] - p) ? h : b, c.heat[0]);
     s += `\nstrike ${h[0]}  net ${fmtG(h[1])}\n  call ${fmtG(h[2])}  put ${fmtG(h[3])}` +
          `\nsnapshot ${dlabel(c.snap)} ${c.taken.slice(11, 16)} ET, spot ${c.spot}` +
-         `\nwalls: call ${c.call_wall}  put ${c.put_wall}  peak ${c.peak}`;
+         `\nwalls: call ${c.call_wall}${c.call_wall_alt != null ? '≈' + c.call_wall_alt : ''}` +
+         `  put ${c.put_wall}${c.put_wall_alt != null ? '≈' + c.put_wall_alt : ''}` +
+         `  peak ${c.peak}${c.peak_alt != null ? '≈' + c.peak_alt : ''}` +
+         (c.call_wall_alt != null || c.put_wall_alt != null || c.peak_alt != null
+           ? '\n  ≈ = a strike >1 step away holds ≥85% of the wall\'s gamma: a zone, not one strike' : '') +
+         (c.src ? `\ndata: ${c.src === 'webull' ? 'Webull' : 'Unusual Whales'}` : '');
     if (c.blended){
       const L = c.labels || {};
       s += `\n+${c.bmeta.idx}: ${c.share != null ? Math.round(c.share * 100) + '% of the band\'s gamma' : ''}` +

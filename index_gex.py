@@ -158,6 +158,40 @@ def share(etf_heat, idx_grid_heat):
     return (gi / (ge + gi)) if (ge + gi) else None
 
 
+# ------------------------------------------------------------- walls
+#: A wall is a TIE when a strike more than one step away carries at least this
+#: share of the wall's gamma. Set from the 2026-10-01 SPY+SPX disagreement:
+#: when Webull and UW picked different put walls, Webull's pick held a median
+#: 89% (min 73%) of UW's pick's gamma IN UW'S OWN DATA -- i.e. the two sources
+#: were choosing between near-equals. 0.85 catches that case without flagging
+#: every wall: a clear wall (runner-up well under 85%) stays a single strike.
+WALL_TIE = 0.85
+
+
+def walls_with_ties(heat, tie=WALL_TIE):
+    """{strike: (call, put)} -> {call_wall, put_wall, peak} plus, for each, a
+    `*_alt` runner-up strike when it is within `tie` of the winner and more
+    than one strike step away (an adjacent strike is the same wall, not a
+    rival). None when the heat is empty."""
+    ks = sorted(heat)
+    if not ks:
+        return None
+    steps = sorted(b - a for a, b in zip(ks, ks[1:]) if b > a)
+    step = steps[len(steps) // 2] if steps else 1.0
+    out = {}
+    for key, val in (("call_wall", lambda k: heat[k][0]),
+                     ("put_wall", lambda k: -heat[k][1]),
+                     ("peak", lambda k: abs(heat[k][0] + heat[k][1]))):
+        best = max(ks, key=val)
+        out[key] = best
+        rivals = [k for k in ks if abs(k - best) > step * 1.01 and val(k) > 0]
+        if rivals and val(best) > 0:
+            r = max(rivals, key=val)
+            if val(r) >= tie * val(best):
+                out[key + "_alt"] = r
+    return out
+
+
 # ------------------------------------------------------------- Webull side
 def parity_forward(chain, near=None, n=5):
     """Index forward from put-call parity on ONE expiry's mids.

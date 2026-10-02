@@ -138,8 +138,10 @@ Then, in another shell:
 python serve_viewer.py      # chart on http://127.0.0.1:8765/flow_viewer.html
 ```
 
-You need an Unusual Whales subscription for the flow data. Webull OpenAPI
-credentials are needed only to execute; without them the bot runs read-only.
+The bot's own signal needs an Unusual Whales subscription for the flow data;
+without a UW key the engine starts manual-only and the viewer runs on Webull
+data alone (see [Data you need](#data-you-need)). Webull OpenAPI credentials
+are needed to execute; without them the bot runs read-only.
 The research scripts read a local parquet lake built by
 `uw_options_data_lake.py` — see `PRESAMPLE_PLAN.md` for what that costs in API
 calls and time.
@@ -218,21 +220,44 @@ away.
 It depends on which half of the repository you use.
 
 **Trading by hand from the live viewer** — the chart, the strike strip, staged
-orders, underlying TP/SL and the sideline — is designed to need nothing but a
-Webull account:
+orders, underlying TP/SL and the sideline — needs nothing but a Webull
+account:
 
 | source | used for | cost |
 |---|---|---|
 | Webull OpenAPI | order execution, live stock and option quotes, and the option greeks and open interest the GEX heat is computed from | a Webull account with real-time US stock and option (OPRA) market data enabled |
 
-> **Status:** the Webull-only data path is validated but not yet wired in. On
-> 2026-10-01 a GEX heat built from Webull's own greeks and open interest
-> matched the Unusual Whales heat the chart draws (median correlation
-> 0.998–0.999 on SPY, QQQ and IWM; `check_webull_gex.py`). Until the viewer
-> gains that mode it still reads GEX, VWAP volume and flow from Unusual
-> Whales. Even then, the flow panes — cumulative net premium and sweeps — stay
-> Unusual Whales only: Webull's option prints carry no exchange or condition
-> codes, so sweeps and multi-leg trades cannot be separated out of them.
+Leave `UW_API_KEY` empty and the engine starts **manual-only**: the bot's own
+flow feed, regimes and rules are switched off and say so, and everything above
+runs on Webull. With a UW key you can still put the chart on Webull data with
+`VIEWER_DATA=webull` (the default, `auto`, uses Unusual Whales when a key is
+set). The source is chosen once at startup and shown on the chart — it never
+switches silently mid-session.
+
+On Webull data:
+
+- **GEX heat** (0–1DTE, the weekly page, and the `+index` blend) is computed
+  from Webull's own greeks and open interest, in the same units the Unusual
+  Whales heat uses. Against the Unusual Whales heat on 2026-10-01 it matched
+  at a median correlation of 0.998–0.999 on SPY, QQQ and IWM, with walls and
+  peak within one strike 87–100% of the time (`check_webull_gex.py`).
+- **Walls** are the 0–1DTE heat's own, marked as such. When another strike more
+  than one step away carries at least 85% of a wall's gamma, the wall is shown
+  as a zone (`760 ≈ 762`), not a single strike.
+- **SPY + SPX is the case to read that way.** Built from Webull alone, the
+  blended map matched Unusual Whales in shape (correlation 0.976) and peak, but
+  its single call or put wall agreed within one strike only half the time:
+  several SPX strikes carry near-equal gamma, and which one tops the list
+  flips between data sources. QQQ + NDX and IWM + RUT passed every criterion
+  (`check_webull_blend.py`). The index blend appears from 09:31, once the
+  index options are trading.
+- **VWAP, volume and RVOL** come from Webull's 1-minute bars; the strike
+  strip's volume and open interest from the same option snapshots as the heat.
+- **Not available:** cumulative flow and sweeps — Webull's option prints carry
+  no exchange or condition codes, so sweeps and multi-leg trades cannot be
+  separated out — and the all-expiry walls and gamma flip, which need the
+  whole chain. The chart labels each of these as missing rather than drawing
+  them empty.
 
 **The bot's own signal, research and backtesting** need the full set:
 

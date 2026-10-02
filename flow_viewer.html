@@ -564,7 +564,8 @@ function gxBtn(s){
   if(!idx) return '';
   const B = s.gex && s.gex.blend;
   const why = !B ? `no ${idx} blend from the bot yet (index rows or ratio missing)`
-    : `${idx} is ${B.share != null ? Math.round(B.share*100) + '%' : '?'} of the 0-1DTE gamma in the band · ratio ${B.ratio} (${B.ratio_src === 'today' ? 'today, ' + B.ratio_n + ' min' : 'from ' + B.ratio_src})`;
+    : `${idx} is ${B.share != null ? Math.round(B.share*100) + '%' : '?'} of the 0-1DTE gamma in the band · ratio ${B.ratio} (${B.ratio_src === 'today' ? 'today, ' + B.ratio_n + ' min' : B.ratio_src === 'parity' ? 'put-call parity, Webull' : 'from ' + B.ratio_src})${
+      B.ratio_src === 'parity' && idx === 'SPX' ? ' · on Webull data the SPY+SPX walls are zones, not single strikes (agreed with UW 50% of the time, 2026-10-01)' : ''}`;
   return `<button id="gxBtn" class="tag" title="${esc(why)} — g toggles"
     style="width:auto;flex:none;margin:0;font:inherit;font-size:11px;cursor:pointer;background:${GX_IDX && B ? '#0f3a3d' : 'transparent'};color:${
       GX_IDX && B ? '#39c5cf' : 'var(--fg)'};border-color:${GX_IDX ? '#39c5cf' : 'var(--line)'}">γ ${
@@ -727,6 +728,27 @@ function liveDraw(d, s){
         title:`${B ? liveTk + ' ' : ''}${lbl} ${W[key]}`,
       }));
     }
+    /* WEBULL DATA has no all-expiry walls or gamma flip (UW /gex-levels needs
+       the whole chain), so the 0-1DTE heat's OWN walls are drawn instead --
+       labelled "0-1DTE" so they are never mistaken for the all-OI ones. A wall
+       with a near-equal rival (index_gex.WALL_TIE) is printed as a zone,
+       "760 ≈ 755": on SPY+SPX the two data sources agreed on a single wall
+       only half the time (check_webull_blend, 2026-10-01).               */
+    const W1 = !Object.keys(W).length ? ((B ? B.walls01 : G.walls01) || null) : null;
+    if(W1) for(const [key, col, lbl] of [
+        ['call_wall','#58a6ff','0-1DTE call wall'], ['put_wall','#f85149','0-1DTE put wall']]){
+      if(W1[key] == null) continue;
+      const alt = W1[key + '_alt'];
+      liveSeries.gexLines.push(liveSeries.px.createPriceLine({
+        price:W1[key], color:col, lineWidth:2,
+        lineStyle:LWC.LineStyle.Dashed, axisLabelVisible:true,
+        title:`${lbl} ${W1[key]}${alt != null ? ' ≈ ' + alt + ' (zone)' : ''}`,
+      }));
+      if(alt != null) liveSeries.gexLines.push(liveSeries.px.createPriceLine({
+        price:alt, color:col, lineWidth:1,
+        lineStyle:LWC.LineStyle.Dotted, axisLabelVisible:false, title:'',
+      }));
+    }
   }
 
   drawUl();
@@ -765,9 +787,17 @@ function liveDraw(d, s){
     <span class="tag">${r.gex||'—'} GEX</span><span class="tag">amp ${r.amp??'—'}</span>
     ${gxBtn(s)}
     <span id="volRead"></span>
-    <span class="k">cum</span><b>${fmtM(s.cum||0)}</b>
+    <span class="k">cum</span><b title="${d.flow_src !== null ? '' : 'no flow: this engine is manual-only (no UW_API_KEY)'}">${
+      d.flow_src !== null ? fmtM(s.cum||0) : '—'}</b>
     <span class="k">gate</span><b>±${s.thr?fmtM(s.thr):'—'}</b>
     <span class="tag">${d.dry_run?'PAPER':'LIVE MONEY'}</span>
+    <span class="tag" title="${d.data_src === 'webull'
+        ? esc(`viewer market data from Webull (VIEWER_DATA) · ${(d.webull_data||{}).calls ?? 0} calls, ${
+            (d.webull_data||{}).fails ?? 0} failed${(d.webull_data||{}).last_fail ? ' · last ' + d.webull_data.last_fail : ''}`)
+        : 'viewer market data from Unusual Whales (VIEWER_DATA)'}"
+      style="${d.data_src === 'webull' && (d.webull_data||{}).fails ? 'border-color:var(--put);color:var(--put)' : ''}">data ${
+      d.data_src === 'webull' ? 'Webull' : 'UW'}</span>
+    ${d.flow_src !== null ? '' : '<span class="tag" style="color:var(--dim)" title="no UW_API_KEY: the bot\'s flow, regimes and rules are off">manual-only</span>'}
     ${p ? `<span class="k">pos</span><b>${p.dir} ${p.strike} ${p.dte}DTE</b>
       <span class="k">entry</span>${p.entry} <span class="k">bid</span>${p.bid}
       <span class="k">trail</span>${p.trail ?? '—'}
@@ -799,15 +829,29 @@ function liveDraw(d, s){
       session's ${GX_INDEX[liveTk]}/${liveTk} ratio; dotted = ${GX_INDEX[liveTk]}'s biggest
       strikes, labelled natively${
       gxBlend(s.gex) ? ` · now ${Math.round((s.gex.blend.share||0)*100)}% of the band's gamma` : ''}</span>` : ''}
+    ${d.data_src === 'webull' ? `
+    <span><i style="background:#58a6ff"></i>0-1DTE call wall · <i style="background:#f85149"></i>put wall
+      — from the heat itself; "a ≈ b (zone)" when a strike more than one step away
+      carries ≥ 85% of the wall's gamma</span>
+    <span style="color:var(--dim)">all-expiry walls and gamma flip: Unusual Whales only
+      (they need the whole chain)</span>
+    ${liveTk === 'SPY' ? `<span style="color:var(--put)">SPY+SPX on Webull data: shape and peak
+      match Unusual Whales, but the single wall agreed only 50% of the time
+      (2026-10-01) — several SPX strikes carry near-equal gamma. Read walls as zones.</span>` : ''}` : `
     <span><i style="background:#58a6ff"></i>call wall</span>
     <span><i style="background:#f85149"></i>put wall</span>
     <span><i style="background:#d29922"></i>gamma flip${
-      s.gex && s.gex.src ? ` (${s.gex.src})` : ''}</span>
+      s.gex && s.gex.src ? ` (${s.gex.src})` : ''}</span>`}
+    ${d.flow_src !== null ? `
     <span><i style="background:#58a6ff"></i>cumulative net premium</span>
-    <span><i style="background:#a371f7"></i>EMA(5) — crossings are the trigger</span>
+    <span><i style="background:#a371f7"></i>EMA(5) — crossings are the trigger</span>` : `
+    <span style="color:var(--dim)">cumulative flow, EMA and the gate: need Unusual Whales —
+      this engine is manual-only (no UW_API_KEY)</span>`}
+    ${d.data_src === 'webull' ? `<span style="color:var(--dim)">sweeps: Unusual Whales only —
+      Webull option prints carry no exchange or condition codes</span>` : `
     <span><i style="background:#ff7b72"></i>sweeps only${
       (s.sweep||[]).length ? ` (${s.sweep.length} min, own scale)`
-                           : ' — waiting for alerts'} · ISO, single-leg, opening</span>
+                           : ' — waiting for alerts'} · ISO, single-leg, opening</span>`}
     <span><i style="background:#d29922"></i>p${s.min_flow_pct??'?'} magnitude gate (live, moves)</span>
     <span><i style="background:#56d364"></i>underlying TP · <i style="background:#ff6b6b"></i>SL
       — T/S + click when enabled; dashed = staged with an order</span>

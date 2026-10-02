@@ -237,6 +237,14 @@ class FlowExecutionEngine:
             paper_trading=PAPER_TRADING
         )
         self.uw = UnusualWhalesClient(os.getenv("UW_API_KEY"))
+        # 🚨 MANUAL-ONLY WHEN THERE IS NO UW KEY (2026-10-02). Everything the
+        # BOT trades on -- the flow feed, the regimes, VIX, the rule scanner --
+        # is Unusual Whales. Without a key those calls would 401 into empty
+        # data all day and the scanner would sit on a flat zero that looks like
+        # "no triggers". So they are skipped, said so at startup, and the engine
+        # keeps what needs only Webull: quotes, baskets, the manual desk, the
+        # viewer (VIEWER_DATA, see webull_viewer_data) and Telegram.
+        self.uw_enabled = bool((os.getenv("UW_API_KEY") or "").strip())
         self.bs_engine = LocalBlackScholesEngine(risk_free_rate=0.045)
         self.strike_selector = StrikeSelector(self.bs_engine)
         self.flow_tracker = FlowMomentumTracker()
@@ -867,21 +875,17 @@ class FlowExecutionEngine:
             self.cumulative_flow[t] = 0.0
             self.processed_ticks[t] = set()
             self.processed_tick_order[t] = deque()
-        # yesterday's REST hand-overs do not carry into today
-        if hasattr(self.uw, "reset_session"):
-            self.uw.reset_session()
-        for t in tickers:
-            self.rest_minute_vals[t] = {}
-            try:
-                self._seed_flow(t)
-            except Exception as e:
-                print(f"  ⚠️ re-seed {t} failed: {e}")
-        self._poll_daily_gex(tickers)
-        self._poll_session_regimes(tickers)
-        self._poll_session_dex(tickers)
-        self._poll_session_vix()
-        self._seed_price_history(tickers)
-        self._seed_amt_profiles(tickers)
+        if self.uw_enabled:             # manual-only: nothing UW to reset or poll
+            # yesterday's REST hand-overs do not carry into today
+            if hasattr(self.uw, "reset_session"):
+                self.uw.reset_session()
+            for t in tickers:
+                self.rest_minute_vals[t] = {}
+                try:
+                    self._seed_flow(t)
+                except Exception as e:
+                    print(f"  ⚠️ re-seed {t} failed: {e}")
+            self._uw_session_polls(tickers)
 
         # 🚨 REBUILD THE OPTIONS BASKET. Everything above resets per-day
         # STATE; the basket is per-day INVENTORY and was never rebuilt here.
@@ -1363,6 +1367,16 @@ class FlowExecutionEngine:
                     self._mark_tick_processed(ticker, tick_id)
         return self.cumulative_flow[ticker]
 
+    def _uw_session_polls(self, tickers):
+        """The once-per-session UW reads, in their original order -- shared by
+        startup and the daily rollover, and skipped together in manual-only."""
+        self._poll_daily_gex(tickers)
+        self._poll_session_regimes(tickers)
+        self._poll_session_dex(tickers)
+        self._poll_session_vix()
+        self._seed_price_history(tickers)
+        self._seed_amt_profiles(tickers)
+
     def _seed_flow(self, ticker: str) -> float:
         """Seed today's cumulative flow from REST AND record which minutes that
         covered, so the first REST poll does not count them again."""
@@ -1811,25 +1825,26 @@ class FlowExecutionEngine:
         tickers_to_track = tracked_tickers()
         print(f"🎯 Tracking {len(tickers_to_track)} ticker(s): {', '.join(tickers_to_track)}")
 
-        print("🌊 Starting Unusual Whales flow feed (WebSocket if the plan allows, else REST)...")
-        self.uw.start_multiplexer(tickers_to_track)
-        
+        if self.uw_enabled:
+            print("🌊 Starting Unusual Whales flow feed (WebSocket if the plan allows, else REST)...")
+            self.uw.start_multiplexer(tickers_to_track)
+        else:
+            print("🖐️  MANUAL-ONLY: no UW_API_KEY -- the bot's flow feed, regimes and rules "
+                  "are OFF.\n    Webull quotes, the manual desk and the viewer run as normal.")
+
         print("🔌 Igniting Webull MQTT Engine...")
         self.webull.start_tick_stream(tickers_to_track)
-        
-        # --- SEED DAILY CUMULATIVE FLOW FOR MID-DAY STARTS ---
-        print("\n🌱 Seeding Mid-Day Cumulative Flow (REST API Fallback)...")
-        for ticker in tickers_to_track:
-            seeded_total = self._seed_flow(ticker)
-            print(f"  ├─ {ticker}: Seeded ${seeded_total:,.0f} in historical flow "
-                  f"({len(self.rest_minute_vals.get(ticker, {}))} minutes).")
+
+        if self.uw_enabled:
+            # --- SEED DAILY CUMULATIVE FLOW FOR MID-DAY STARTS ---
+            print("\n🌱 Seeding Mid-Day Cumulative Flow (REST API Fallback)...")
+            for ticker in tickers_to_track:
+                seeded_total = self._seed_flow(ticker)
+                print(f"  ├─ {ticker}: Seeded ${seeded_total:,.0f} in historical flow "
+                      f"({len(self.rest_minute_vals.get(ticker, {}))} minutes).")
         self.session_date = market_now().date()
-        self._poll_daily_gex(tickers_to_track)
-        self._poll_session_regimes(tickers_to_track)
-        self._poll_session_dex(tickers_to_track)
-        self._poll_session_vix()
-        self._seed_price_history(tickers_to_track)
-        self._seed_amt_profiles(tickers_to_track)
+        if self.uw_enabled:
+            self._uw_session_polls(tickers_to_track)
         self._arm_telegram_commands()
 
         time.sleep(5)
@@ -1849,7 +1864,8 @@ class FlowExecutionEngine:
         # longer implies nothing can leave this machine. This banner is the
         # line you read to confirm you are safe, so it has to say both.
         from config import MANUAL_TRADING_ARMED as _ARMED
-        print(f"   bot orders    : {'PAPER — nothing sent' if DRY_RUN else '🔴 LIVE'}")
+        print(f"   bot orders    : "
+              f"{'OFF — manual-only, no UW key' if not self.uw_enabled else 'PAPER — nothing sent' if DRY_RUN else '🔴 LIVE'}")
         print(f"   manual orders : "
               f"{'🔴 ARMED — REAL CAPITAL from the viewer' if _ARMED else 'DISARMED — refused'}")
         if _ARMED and DRY_RUN:
@@ -1872,7 +1888,7 @@ class FlowExecutionEngine:
                 if current_time.second == 0 and current_time.minute != getattr(self, 'last_heartbeat_minute', -1):
                     self.last_heartbeat_minute = current_time.minute
                     self._record_price_minute(tickers_to_track, current_time)
-                    for _atk in self._amt_open_rules:
+                    for _atk in (self._amt_open_rules if self.uw_enabled else ()):
                         if _atk not in self._amt_open:
                             self._amt_open_state(_atk)
                     spy_spot = self.get_spot_price("SPY")
@@ -2137,7 +2153,8 @@ class FlowExecutionEngine:
                 manual_orders.poll(
                     self, current_time.hour * 60 + current_time.minute)
 
-                for ticker in tickers_to_track:
+                # manual-only (no UW key): the scanner is the bot's UW signal -- skip it
+                for ticker in (tickers_to_track if self.uw_enabled else ()):
                     settings = WATCHLIST.get(ticker, {})
 
                     flow_ticks = self.uw.get_live_net_premium(ticker)
