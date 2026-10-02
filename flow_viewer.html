@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cleanbot Flow Viewer</title>
+<title>WeBullRG Flow Viewer</title>
 <!--
   Local flow-trigger viewer. Served from the repo root:
       python export_flow_tape.py
@@ -546,6 +546,30 @@ let LIVE = null, liveTimer = null, liveTk = null, liveSeries = null;
 function uiGet(k){ try { return localStorage.getItem(k); } catch(e){ return null; } }
 function uiSet(k, v){ try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch(e){} }
 let LIVEVOL = {};        // et_stamp -> [volume, rvol], for the crosshair readout
+/* γ +INDEX toggle (button in the live bar, or `g`). Per-browser, like the
+   ticker. When on but the bot has no blend for this ticker (no index, no
+   ratio yet), the chart falls back to the ETF heat and the button says why. */
+const GX_INDEX = {SPY:'SPX', QQQ:'NDX', IWM:'RUT'};
+let GX_IDX = uiGet('fv_gx_idx') === '1';
+function gxBlend(G){
+  const B = G && G.blend;
+  return (GX_IDX && B && (B.heat || []).length) ? B : null;
+}
+function gxToggle(){
+  GX_IDX = !GX_IDX; uiSet('fv_gx_idx', GX_IDX ? '1' : null);
+  if(LIVE && liveTk) liveDraw(LIVE, LIVE.tickers[liveTk]);
+}
+function gxBtn(s){
+  const idx = GX_INDEX[liveTk];
+  if(!idx) return '';
+  const B = s.gex && s.gex.blend;
+  const why = !B ? `no ${idx} blend from the bot yet (index rows or ratio missing)`
+    : `${idx} is ${B.share != null ? Math.round(B.share*100) + '%' : '?'} of the 0-1DTE gamma in the band · ratio ${B.ratio} (${B.ratio_src === 'today' ? 'today, ' + B.ratio_n + ' min' : 'from ' + B.ratio_src})`;
+  return `<button id="gxBtn" class="tag" title="${esc(why)} — g toggles"
+    style="width:auto;flex:none;margin:0;font:inherit;font-size:11px;cursor:pointer;background:${GX_IDX && B ? '#0f3a3d' : 'transparent'};color:${
+      GX_IDX && B ? '#39c5cf' : 'var(--fg)'};border-color:${GX_IDX ? '#39c5cf' : 'var(--line)'}">γ ${
+      esc(liveTk)}${GX_IDX ? '+' + idx : ''}${GX_IDX && !B ? ' —' : ''}</button>`;
+}
 
 function liveStop(){
   clearInterval(liveTimer); liveTimer = null; LIVE = null; liveSeries = null;
@@ -665,18 +689,32 @@ function liveDraw(d, s){
   liveSeries.gexLines = [];
   const G = s.gex;
   if(G){
-    const heat = G.heat || [];
-    const mx = Math.max(1, ...heat.map(([,v]) => Math.abs(v)));
-    for(const [k, v] of heat){
+    /* +INDEX (g, or the γ button in the bar): the same 0-1DTE heat with the
+       index's gamma added -- SPX on SPY, NDX on QQQ, RUT on IWM -- mapped to
+       this ETF's price by the session's index/ETF ratio (live_state /
+       index_gex.py). Drawn in CYAN so the mode can never be mistaken for the
+       ETF-only green; a strike the index dominates carries its native label. */
+    const B = gxBlend(G);
+    const heat = B ? B.heat : (G.heat || []);
+    const rgb = B ? '57,197,207' : '63,185,80';
+    const mx = Math.max(1, ...heat.map(h => Math.abs(h[1])));
+    for(const [k, v, lab] of heat){
       const a = Math.max(0.06, Math.min(1, Math.abs(v)/mx));
       liveSeries.gexLines.push(liveSeries.px.createPriceLine({
-        price:k, color:`rgba(63,185,80,${a.toFixed(3)})`,
+        price:k, color:`rgba(${rgb},${a.toFixed(3)})`,
         lineWidth: a > 0.55 ? 3 : (a > 0.25 ? 2 : 1),
         lineStyle: LWC.LineStyle.Solid,
         axisLabelVisible: a > 0.55,
-        title: a > 0.55 ? `γ ${fmtM(v)}` : '',
+        title: a > 0.55 ? `γ ${fmtM(v)}${lab ? ' · ' + lab : ''}` : '',
       }));
     }
+    // the index book's own biggest strikes, at their EXACT mapped price
+    if(B) for(const l of (B.levels || []))
+      liveSeries.gexLines.push(liveSeries.px.createPriceLine({
+        price:l.at, color:'#39c5cf', lineWidth:2,
+        lineStyle:LWC.LineStyle.Dotted, axisLabelVisible:true,
+        title:`${l.label} ${l.kind}`,
+      }));
     const W = G.walls || {};
     for(const [key, col, lbl] of [
         ['call_wall','#58a6ff','call wall'],
@@ -686,7 +724,7 @@ function liveDraw(d, s){
       liveSeries.gexLines.push(liveSeries.px.createPriceLine({
         price:W[key], color:col, lineWidth:2,
         lineStyle:LWC.LineStyle.Dashed, axisLabelVisible:true,
-        title:`${lbl} ${W[key]}`,
+        title:`${B ? liveTk + ' ' : ''}${lbl} ${W[key]}`,
       }));
     }
   }
@@ -725,6 +763,7 @@ function liveDraw(d, s){
     <span class="k">regime</span>
     <span class="tag">${r.vol||'—'}</span><span class="tag">${r.trend||'—'}</span>
     <span class="tag">${r.gex||'—'} GEX</span><span class="tag">amp ${r.amp??'—'}</span>
+    ${gxBtn(s)}
     <span id="volRead"></span>
     <span class="k">cum</span><b>${fmtM(s.cum||0)}</b>
     <span class="k">gate</span><b>±${s.thr?fmtM(s.thr):'—'}</b>
@@ -735,6 +774,7 @@ function liveDraw(d, s){
       <b style="color:${p.roe>0?'var(--up)':'var(--dn)'}">
       ${p.roe>0?'+':''}${p.roe ?? '?'}%</b>`
       : `<span class="k">${s.state}</span>`}`;
+  const gb = $('#gxBtn'); if(gb) gb.onclick = gxToggle;
   $('#legend').innerHTML = `
     <div class="hd"><span>chart key — live</span>
       <span>k or click to dismiss</span></div>
@@ -754,6 +794,11 @@ function liveDraw(d, s){
       (s.gex && (s.gex.heat||[]).length)
         ? ` (${s.gex.heat.length} strikes, ±3%)`
         : ' — waiting for first poll (up to 10 min)'}</span>
+    ${GX_INDEX[liveTk] ? `<span><i style="background:#39c5cf"></i>γ +${GX_INDEX[liveTk]} (g):
+      the same heat with ${GX_INDEX[liveTk]}'s gamma added, mapped to ${liveTk} by the
+      session's ${GX_INDEX[liveTk]}/${liveTk} ratio; dotted = ${GX_INDEX[liveTk]}'s biggest
+      strikes, labelled natively${
+      gxBlend(s.gex) ? ` · now ${Math.round((s.gex.blend.share||0)*100)}% of the band's gamma` : ''}</span>` : ''}
     <span><i style="background:#58a6ff"></i>call wall</span>
     <span><i style="background:#f85149"></i>put wall</span>
     <span><i style="background:#d29922"></i>gamma flip${
@@ -1576,6 +1621,7 @@ addEventListener('keydown', e => {
   if(e.key === 'Escape' && SEL){ e.preventDefault(); $('#stageX').click(); return; }
   if(e.key === 't' || e.key === 's'){ UL_KEYS.add(e.key); return; }
   if(e.key === 'k'){ e.preventDefault(); toggleKey(); return; }
+  if(e.key === 'g' && LIVE){ e.preventDefault(); gxToggle(); return; }
   if(e.key === 'n'){ e.preventDefault(); openNote(); return; }
   if(e.key === 'l'){ e.preventDefault(); $('#liveBtn').click(); return; }
   if(LIVE) return;

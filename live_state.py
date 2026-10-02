@@ -357,6 +357,40 @@ def _fetch_gex(uw, tk, spot):
     """
     import datetime as _d
     today = _d.datetime.now(_NY).date()
+    lo_e = today.isoformat()
+    near, pages, exhausted = _page_near(uw, tk)
+    # 🚨 0-1DTE = today + the NEXT LISTED expiry, not today + 1 calendar day.
+    # The calendar version asked for Saturday every Friday (and for the
+    # holiday before a long weekend), so the heat silently fell to 0DTE-only
+    # on exactly those days. Fixed 2026-09-27.
+    want = _want_01(near, lo_e)
+    agg = {}
+    for r in near:
+        if r["e"] in want:
+            agg[r["k"]] = agg.get(r["k"], 0.0) + r["cg"] + r["pg"]
+    hits = sum(1 for r in near if r["e"] in want)
+    _GEX_NEAR[tk] = near
+    # 🚨 SAY SO when the window never contained the near-dated expiries. An
+    # empty heat is not the same as no gamma near spot, and conflating them
+    # hid a broken SPY/QQQ heat map for an unknown period.
+    if not hits:
+        print(f"  ⚠️ [GEX] {tk}: {pages} page(s), no rows at {sorted(want)} — "
+              f"heat will be EMPTY"
+              + ("" if exhausted else f" (hit the {GEX_PAGES}-page cap; the "
+                                      f"chain is bigger than the window)"))
+    return _finish_gex(uw, tk, spot, agg)
+
+
+def _want_01(near, lo_e):
+    nxt = min((r["e"] for r in near if r["e"] > lo_e), default=None)
+    return {lo_e} | ({nxt} if nxt else set())
+
+
+def _page_near(uw, tk):
+    """Every expiry-strike row expiring in the next 7 calendar days.
+    Returns (rows, pages fetched, exhausted-without-hitting-the-cap)."""
+    import datetime as _d
+    today = _d.datetime.now(_NY).date()
     # Page for the next 7 calendar days, not just 0-1DTE: that covers the
     # next listed expiry across any weekend or holiday, and every remaining
     # expiry of the week for the weekly page (_weekly_update) -- which is
@@ -391,26 +425,10 @@ def _fetch_gex(uw, tk, spot):
             break                       # we have what we came for
     else:
         exhausted = False               # hit the page cap without breaking
-    # 🚨 0-1DTE = today + the NEXT LISTED expiry, not today + 1 calendar day.
-    # The calendar version asked for Saturday every Friday (and for the
-    # holiday before a long weekend), so the heat silently fell to 0DTE-only
-    # on exactly those days. Fixed 2026-09-27.
-    nxt = min((r["e"] for r in near if r["e"] > lo_e), default=None)
-    want = {lo_e} | ({nxt} if nxt else set())
-    agg = {}
-    for r in near:
-        if r["e"] in want:
-            agg[r["k"]] = agg.get(r["k"], 0.0) + r["cg"] + r["pg"]
-    hits = sum(1 for r in near if r["e"] in want)
-    _GEX_NEAR[tk] = near
-    # 🚨 SAY SO when the window never contained the near-dated expiries. An
-    # empty heat is not the same as no gamma near spot, and conflating them
-    # hid a broken SPY/QQQ heat map for an unknown period.
-    if not hits:
-        print(f"  ⚠️ [GEX] {tk}: {pages} page(s), no rows at {sorted(want)} — "
-              f"heat will be EMPTY"
-              + ("" if exhausted else f" (hit the {GEX_PAGES}-page cap; the "
-                                      f"chain is bigger than the window)"))
+    return near, pages, exhausted
+
+
+def _finish_gex(uw, tk, spot, agg):
     heat = []
     if agg and spot:
         lo, hi = spot * (1 - GEX_BAND), spot * (1 + GEX_BAND)
@@ -442,7 +460,121 @@ def _fetch_gex(uw, tk, spot):
     return g
 
 
-LEVELS_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+# ---------------------------------------------------------------- INDEX BLEND
+# SPY + SPX, QQQ + NDX, IWM + RUT on the ETF's price axis -- the viewer's
+# "+SPX" toggle. All the math is in index_gex.py (shared with the Webull-only
+# path); this is only the UW plumbing. On 2026-09-30 SPX was 83-94% of the
+# near-dated S&P gamma, so the ETF-only heat is the minority view on SPY.
+# { etf: [index rows, same 7-day window as _GEX_NEAR] } -- weekly page reads it
+_GEX_IDX_NEAR = {}
+# { etf: {"ratio", "src", "n", "day"} } -- last good index/ETF ratio
+_IDX_RATIO = {}
+IDX_RATIO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "live", "index_ratio.json")
+IDX_RATIO_MAX_AGE_DAYS = 5
+
+
+def _rth_series(uw, tk, day):
+    """{ 'HH:MM' ET: price } for one ticker's /spot-exposures minutes, RTH only.
+
+    🚨 RTH ONLY. UW's index price before 09:30 is the prior close standing
+    still while the ETF trades premarket, so premarket minutes would drag the
+    ratio by the whole overnight move."""
+    rows = _uw_get(uw, f"/api/stock/{tk}/spot-exposures") or []
+    out = {}
+    for x in rows:
+        try:
+            t = _dt.datetime.fromisoformat(
+                str(x["time"]).replace("Z", "+00:00")).astimezone(_NY)
+            if t.date() == day and 570 <= t.hour * 60 + t.minute <= 960:
+                out[t.strftime("%H:%M")] = float(x["price"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _idx_ratio(uw, etf, idx):
+    """Today's median index/ETF ratio over matched RTH minutes; before there
+    are 10 of those, the last session's, read from IDX_RATIO_FILE. None when
+    neither exists -- the blend is then simply not drawn."""
+    import index_gex as IX
+    day = _dt.datetime.now(_NY).date()
+    ratio, n = IX.ratio_from_series(_rth_series(uw, etf, day), _rth_series(uw, idx, day))
+    if ratio:
+        _IDX_RATIO[etf] = dict(ratio=round(ratio, 5), src="today", n=n, day=day.isoformat())
+        try:
+            have = {}
+            try:
+                with open(IDX_RATIO_FILE, encoding="utf-8") as f:
+                    have = json.load(f)
+            except (OSError, ValueError):
+                pass
+            have[etf] = _IDX_RATIO[etf]
+            _atomic_write(IDX_RATIO_FILE, have)
+        except Exception:
+            pass
+        return _IDX_RATIO[etf]
+    prev = _IDX_RATIO.get(etf)
+    if not prev:
+        try:
+            with open(IDX_RATIO_FILE, encoding="utf-8") as f:
+                prev = (json.load(f) or {}).get(etf)
+        except (OSError, ValueError):
+            prev = None
+    if prev:
+        age = (day - _dt.date.fromisoformat(prev["day"])).days
+        if 0 <= age <= IDX_RATIO_MAX_AGE_DAYS:
+            return dict(prev, src=prev["day"] if age else "today")
+    return None
+
+
+def _fetch_index_blend(uw, tk, spot, g):
+    """Adds g["blend"]: the ETF's 0-1DTE heat with its index's gamma added.
+    Never raises; on any shortfall g simply has no "blend" and the viewer
+    says so."""
+    import index_gex as IX
+    idx = IX.INDEX_OF.get(tk)
+    if not idx or not spot:
+        return
+    try:
+        rows, _pages, _ok = _page_near(uw, idx)
+        if not rows:
+            print(f"  ⚠️ [GEX BLEND] {tk}: no {idx} rows -- blend not drawn")
+            return
+        _GEX_IDX_NEAR[tk] = rows
+        rt = _idx_ratio(uw, tk, idx)
+        if not rt:
+            print(f"  ⚠️ [GEX BLEND] {tk}: no {idx}/{tk} ratio yet -- blend not drawn")
+            return
+        today = _dt.datetime.now(_NY).date().isoformat()
+        etf_rows = _GEX_NEAR.get(tk) or []
+        # the SAME 0-1DTE expiries as the ETF heat, so the toggle changes one thing
+        want = _want_01(etf_rows, today)
+        lo, hi = spot * (1 - GEX_BAND), spot * (1 + GEX_BAND)
+        e_heat = IX.heat_of(etf_rows, want, lo, hi)
+        blended, prov = IX.blend_rows([r for r in etf_rows if r["e"] in want],
+                                      [r for r in rows if r["e"] in want], rt["ratio"])
+        b_heat = IX.heat_of(blended, want, lo, hi)
+        i_heat = {k: [b_heat[k][0] - e_heat.get(k, [0, 0])[0],
+                      b_heat[k][1] - e_heat.get(k, [0, 0])[1]] for k in b_heat}
+        heat = []
+        for k in sorted(b_heat):
+            net = b_heat[k][0] + b_heat[k][1]
+            if abs(net) <= 0:
+                continue
+            heat.append([k, round(net), IX.native_label(
+                idx, k, want, prov, sum(e_heat.get(k, [0, 0])), sum(i_heat[k]))])
+        g["blend"] = dict(
+            idx=idx, ratio=rt["ratio"], ratio_src=rt["src"], ratio_n=rt.get("n"),
+            heat=heat, share=_num(IX.share(e_heat, i_heat), 3),
+            levels=IX.index_levels(idx, rows, want, rt["ratio"], lo, hi),
+            expiries=sorted(want), ts=int(time.time()),
+            uw_date=max((r.get("d") or "" for r in rows), default=None))
+    except Exception as e:                      # never reach the GEX loop
+        print(f"  ⚠️ [GEX BLEND] {tk}: {type(e).__name__}: {e}")
+
+
+LEVELS_LOG =os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "gex_levels_log.jsonl")
 
 
@@ -681,6 +813,52 @@ def _weekly_session(tk, tod):
             _wk_write(doc)
 
 
+def _weekly_blend(tk, today, days, spot):
+    """Per remaining expiry: the weekly heat with the index added, walls and
+    peak re-derived on the blend, and each labelled by its native index strike
+    when the index is what put it there. None until today's index rows and a
+    ratio exist (the 0-1DTE blend on this same pass provides the ratio)."""
+    import index_gex as IX
+    b = (_GEX.get(tk) or {}).get("blend")
+    rows, irows = _GEX_NEAR.get(tk) or [], _GEX_IDX_NEAR.get(tk) or []
+    iso = today.isoformat()
+    if not b or not rows or not irows:
+        return None
+    if max((r.get("d") or "" for r in irows), default="") != iso:
+        return None                     # yesterday's OI is not today's map
+    lo, hi = spot * (1 - WEEKLY_BAND), spot * (1 + WEEKLY_BAND)
+    exp = {}
+    for d in days:
+        if d < today:
+            continue
+        E = d.isoformat()
+        er = [r for r in rows if r["e"] == E]
+        ir = [r for r in irows if r["e"] == E]
+        if not ir:
+            continue
+        blended, prov = IX.blend_rows(er, ir, b["ratio"])
+        h = _expiry_heat(blended, spot)
+        if not h:
+            continue
+        eh, bh = IX.heat_of(er, {E}, lo, hi), IX.heat_of(blended, {E}, lo, hi)
+        ih = {k: [bh[k][0] - eh.get(k, [0, 0])[0], bh[k][1] - eh.get(k, [0, 0])[1]]
+              for k in bh}
+        labels = {}
+        for key, side in (("call_wall", 0), ("put_wall", 1), ("peak", None)):
+            k = h[key]
+            pick = (lambda v: sum(v)) if side is None else (lambda v, s=side: v[s])
+            lab = IX.native_label(b["idx"], k, {E}, prov,
+                                  pick(eh.get(k, [0, 0])), pick(ih.get(k, [0, 0])))
+            if lab:
+                labels[key] = lab
+        h["labels"] = labels
+        h["share"] = _num(IX.share(eh, ih), 3)
+        exp[E] = h
+    if not exp:
+        return None
+    return dict(idx=b["idx"], ratio=b["ratio"], ratio_src=b["ratio_src"], exp=exp)
+
+
 def _weekly_update(uw, tk, spot):
     with _WK_LOCK:
         _weekly_update_locked(uw, tk, spot)
@@ -741,6 +919,20 @@ def _weekly_update_locked(uw, tk, spot):
                   f"{data_dates[-1] if data_dates else 'nothing'}, not {iso} -- "
                   f"waiting for today's open interest before snapshotting.")
 
+    # ---- the index blend for today's snapshot. Stamped with its OWN time:
+    #      normally the same pass as the ETF snapshot, but if the ratio or the
+    #      index rows were not ready then, it is added on the first pass they are.
+    snap = t["snapshots"].get(iso)
+    if snap and "blend" not in snap:
+        b = _weekly_blend(tk, today, days, snap["spot"])
+        if b:
+            b["taken_et"] = now.isoformat(timespec="seconds")
+            snap["blend"] = b
+            changed = True
+            print(f"  📅 [WEEKLY GEX] {tk}: +{b['idx']} blend for {len(b['exp'])} "
+                  f"expir{'y' if len(b['exp']) == 1 else 'ies'} (ratio {b['ratio']}, "
+                  f"{b['ratio_src']})")
+
     # ---- earlier days this week: final OHLC + full price line (backstop)
     for d in days:
         if d >= today:
@@ -769,6 +961,7 @@ def _gex_loop(eng):
                     spot = (_PX.get(tk) or {})
                     spot = spot[max(spot)] if spot else None
                     g = _fetch_gex(eng.uw, tk, spot)
+                    _fetch_index_blend(eng.uw, tk, spot, g)   # never raises
                     if g["heat"] or g["walls"]:
                         _GEX[tk] = g
                     if tk in WEEKLY_TICKERS:

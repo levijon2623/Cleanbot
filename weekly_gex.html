@@ -59,6 +59,8 @@
     <label>view <select id="asof"></select></label>
     <label>scale <select id="scale">
       <option value="day">per day</option><option value="week">whole week</option></select></label>
+    <label title="add the index's gamma (SPX on SPY, NDX on QQQ, RUT on IWM), mapped to the ETF's price by that morning's ratio">γ <select id="gx">
+      <option value="">ETF only</option><option value="1">+ index</option></select></label>
     <label>zoom <select id="zoom">
       <option value="0.006">tight</option><option value="0.015" selected>normal</option>
       <option value="0.03">wide</option></select></label>
@@ -123,13 +125,21 @@ function fillAsof(){
 
 /* For expiry E seen from view date V: the latest snapshot S <= min(E, V)
    that contains E. Past expiries land on their own morning; future ones on V. */
+/* With "+ index" on, a snapshot that carries a blend for E draws the blend
+   (ETF + index gamma on the ETF's strikes, walls re-derived on it); one that
+   does not -- every snapshot before 2026-10-01, or a morning the index rows
+   were missing -- falls back to the ETF heat and its header says so. */
+const IDX = {SPY:'SPX', QQQ:'NDX', IWM:'RUT'};
 function pick(E, V){
   const snaps = T().snapshots, lim = V && V < E ? V : E;
   let best = null;
   for (const s of Object.keys(snaps).sort())
     if (s <= lim && snaps[s].exp && snaps[s].exp[E]) best = s;
-  return best ? {snap: best, taken: snaps[best].taken_et, spot: snaps[best].spot,
-                 ...snaps[best].exp[E]} : null;
+  if (!best) return null;
+  const S = snaps[best], b = S.blend, bl = $('#gx').value && b && b.exp && b.exp[E];
+  return {snap: best, taken: S.taken_et, spot: S.spot, ...(bl || S.exp[E]),
+          blended: !!bl, wantBlend: !!$('#gx').value,
+          bmeta: bl ? {idx: b.idx, ratio: b.ratio, src: b.ratio_src, taken: b.taken_et} : null};
 }
 
 function draw(){
@@ -187,7 +197,8 @@ function draw(){
       g.strokeStyle = col; g.lineWidth = MARK_LW; g.setLineDash(dash);
       g.beginPath(); g.moveTo(i * cw + 2, y(k)); g.lineTo((i + 1) * cw - 2, y(k)); g.stroke();
       g.setLineDash([]);
-      markLabel(g, String(k), i * cw + 4, y(k), col);
+      const nat = c.blended && c.labels && c.labels[key];
+      markLabel(g, nat && cw >= 150 ? `${k} · ${nat}` : String(k), i * cw + 4, y(k), col);
     }
   });
 
@@ -220,9 +231,15 @@ function draw(){
     g.fillStyle = d === today ? '#a371f7' : '#8b949e'; g.font = '11px ui-monospace,monospace';
     g.fillText(narrow ? `${dlabel(d).slice(0, 3)} ${tag}` : `${dlabel(d)} · ${tag}`, i * cw + 4, 14);
     const c = cols[i]; g.fillStyle = '#6e7681'; g.font = '10px ui-monospace,monospace';
-    g.fillText(c ? (narrow ? `${c.snap.slice(5)} ${c.taken.slice(11, 16)}`.slice(0, Math.floor(cw / 6.2))
-                           : `snap ${dlabel(c.snap)} ${c.taken.slice(11, 16)}`)
+    const base = c ? (narrow ? `${c.snap.slice(5)} ${c.taken.slice(11, 16)}`
+                             : `snap ${dlabel(c.snap)} ${c.taken.slice(11, 16)}`) : null;
+    const bx = c && c.wantBlend
+      ? (c.blended ? ` +${c.bmeta.idx}${c.share != null ? ' ' + Math.round(c.share * 100) + '%' : ''}`
+                   : (narrow ? ' ETF' : ` no ${IDX[tk] || 'index'}`)) : '';
+    g.fillText(c ? (base + bx).slice(0, narrow ? Math.floor(cw / 6.2) : 999)
                  : (narrow ? '—' : 'no snapshot'), i * cw + 4, 27);
+    if (c && c.wantBlend){                       // cyan header rule = blended column
+      g.fillStyle = c.blended ? '#39c5cf' : '#6e7681'; g.fillRect(i * cw + 1, 31, cw - 2, 2); }
   });
   if (days.includes(today) && !V){
     const i = days.indexOf(today); g.strokeStyle = '#a371f7'; g.lineWidth = 1.5;
@@ -276,6 +293,12 @@ $('#wrap').addEventListener('mousemove', ev => {
     s += `\nstrike ${h[0]}  net ${fmtG(h[1])}\n  call ${fmtG(h[2])}  put ${fmtG(h[3])}` +
          `\nsnapshot ${dlabel(c.snap)} ${c.taken.slice(11, 16)} ET, spot ${c.spot}` +
          `\nwalls: call ${c.call_wall}  put ${c.put_wall}  peak ${c.peak}`;
+    if (c.blended){
+      const L = c.labels || {};
+      s += `\n+${c.bmeta.idx}: ${c.share != null ? Math.round(c.share * 100) + '% of the band\'s gamma' : ''}` +
+           `  ratio ${c.bmeta.ratio} (${c.bmeta.src === 'today' ? 'that session' : 'from ' + c.bmeta.src})` +
+           (Object.keys(L).length ? `\n  ${Object.entries(L).map(([k, v]) => `${k.replace('_', ' ')} = ${v}`).join('  ')}` : '');
+    } else if (c.wantBlend) s += `\n(no ${IDX[tk] || 'index'} blend in this snapshot — ETF only)`;
   } else s += '\nno snapshot for this expiry';
   tip.textContent = s; tip.style.display = 'block';
   const tw = tip.offsetWidth, th = tip.offsetHeight;
@@ -284,6 +307,8 @@ $('#wrap').addEventListener('mousemove', ev => {
 });
 $('#wrap').addEventListener('mouseleave', () => $('#tip').style.display = 'none');
 for (const id of ['#asof', '#scale', '#zoom']) $(id).addEventListener('change', draw);
+$('#gx').value = localGet('wk_gx') || '';
+$('#gx').addEventListener('change', () => { localSet('wk_gx', $('#gx').value); draw(); });
 window.addEventListener('resize', draw);
 
 async function load(){
